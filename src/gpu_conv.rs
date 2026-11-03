@@ -277,22 +277,14 @@ mod kernels {
     }
 
     #[cube(launch)]
-    pub fn scale(x: &Tensor<f32>, coeff: &Tensor<f32>, y: &mut Tensor<f32>, plane: u32) {
-        let at = ABSOLUTE_POS;
-        if at >= y.len() {
-            terminate!();
-        }
-        y[at] = x[at] * coeff[(at / plane as usize) * 3];
-    }
-
-    #[cube(launch)]
     pub fn apply(x: &Tensor<f32>, coeff: &Tensor<f32>, y: &mut Tensor<f32>, plane: u32) {
         let at = ABSOLUTE_POS;
         if at >= y.len() {
             terminate!();
         }
         let c = at / plane as usize;
-        let v = x[at] + coeff[c * 3 + 1];
+        let product = fma(x[at], coeff[c * 3], 0.0f32);
+        let v = product + coeff[c * 3 + 1];
         let mut out = v;
         if v <= 0.0f32 {
             out = v * coeff[c * 3 + 2];
@@ -388,7 +380,6 @@ impl ConvOps for CubeBackend {
             burn::tensor::DType::F64,
         );
         let coeff = empty(&x, [channels * 3]);
-        let scaled = empty(&x, [channels, plane]);
         let y = empty(&x, [channels, plane]);
         kernels::moments::launch(
             &x.client,
@@ -411,22 +402,12 @@ impl ConvOps for CubeBackend {
             plane as u32,
             pieces as u32,
         );
-        // The CPU rounds multiplication before addition. A fused GPU FMA
-        // perturbs the encoder enough to change later TF32 rounding decisions.
-        kernels::scale::launch(
-            &x.client,
-            grid(&x, channels * plane),
-            CubeDim::new_1d(256),
-            x.clone().into_tensor_arg(),
-            coeff.clone().into_tensor_arg(),
-            scaled.clone().into_tensor_arg(),
-            plane as u32,
-        );
+        // An explicit FMA with zero rounds the product before the shift.
         kernels::apply::launch(
             &x.client,
             grid(&x, channels * plane),
             CubeDim::new_1d(256),
-            scaled.into_tensor_arg(),
+            x.clone().into_tensor_arg(),
             coeff.into_tensor_arg(),
             y.clone().into_tensor_arg(),
             plane as u32,

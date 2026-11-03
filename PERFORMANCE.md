@@ -54,6 +54,11 @@ Accepted: double Mamba CMMA column partitions as well as row partitions.
 Mamba 0.538 -> 0.524 s in balanced 1/2/4/2/1 column-width probes; 4 was slower.
 60 s=18.462 s (RTF 0.3077); all 130 s reference fixtures bit-identical;
 strict CUDA clippy and 9 GPU-enabled tests pass. Log: matmul-wide-validation.log.
+Accepted: fuse convolution scale/shift/PReLU with explicit FMA-to-zero product
+rounding. Encoder 0.172 -> 0.166 s, decoder 0.080 -> 0.076 s.
+Full 130 s gate bit-identical; 60 s=18.215 s (RTF 0.3036); strict clippy passes.
+Log: conv-scale-fused-validation.log. Narrower GEMM tiles and unchecked implicit
+convolution showed no material benefit; discarded.
 
 Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
 Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,
