@@ -73,8 +73,8 @@ fn main() -> Result<()> {
             output.len()
         );
         ensure!(
-            wall / seconds <= 0.5,
-            "process missed the 0.50 real-time target"
+            wall / seconds <= 0.25,
+            "process missed the 0.25 real-time target"
         );
         return Ok(());
     }

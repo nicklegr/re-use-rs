@@ -1,4 +1,8 @@
-# Performance loop — target met
+# Performance loop — RTF 0.25 target in progress
+
+Current target: 300 s offline.exe process <= 75 s, including startup/I/O.
+Start from 54de173 (RTF 0.498059). Same original-reference precision gate.
+Prior RTF 0.50 results below are the starting baseline, not the new target.
 
 Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
 Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,
@@ -50,5 +54,5 @@ All fixture/baseline binaries, WAVs, logs: ../work/perf-loop (not tracked).
   resampling. corpus-60s uses the five previews; corpus-300s repeats corpus-60s.
 - `perf signals <dir>`: deterministic 44.1 kHz edge fixtures.
 - `perf exec <offline.exe> <model> <input.wav> <out.wav>`: full process wall time,
-  output validity, and a failing exit code if RTF > 0.50.
+  output validity, and a failing exit code if RTF > 0.25.
 - REUSE_PROFILE=1: synchronized encoder/Mamba/decoder times; unset for timing.
