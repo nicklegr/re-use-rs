@@ -13,6 +13,7 @@ use eyre::Result;
 
 #[backend_extension(Cube)]
 trait ConvOps: Backend {
+    fn conv_input(x: FloatTensor<Self>) -> FloatTensor<Self>;
     #[allow(clippy::too_many_arguments)]
     fn columns(
         x: FloatTensor<Self>,
@@ -245,6 +246,9 @@ fn grid(x: &CubeTensor, n: usize) -> cubecl::CubeCount {
 }
 
 impl ConvOps for CubeBackend {
+    fn conv_input(x: CubeTensor) -> CubeTensor {
+        into_contiguous(x)
+    }
     fn columns(
         x: CubeTensor,
         time: usize,
@@ -418,6 +422,9 @@ impl Conv {
     }
 
     fn forward(&self, x: Tensor<2>, time: usize, freq: usize) -> (Tensor<2>, usize, usize) {
+        // Concatenation may return pitched rows at odd STFT widths. Pack once
+        // here, not once per tile inside `columns` (up to 55 full input copies).
+        let x = Tensor::from_dispatch(<Dispatch as ConvOps>::conv_input(x.into_dispatch()));
         let to = (time + 2 * self.pad.0 - self.dilation * (self.kt - 1) - 1) / self.stride.0 + 1;
         let fo = (freq + 2 * self.pad.1 - self.kf) / self.stride.1 + 1;
         let positions = to * fo;

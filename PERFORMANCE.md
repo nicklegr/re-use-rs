@@ -31,3 +31,10 @@ Accepted: shared-memory FP32 GEMM with CPU K=256 rounding in one launch.
 5x10 s: 27.978 -> 27.305 s; 60 s: 41.835 s (RTF 0.697), all samples identical.
 Removed the direct cubek dependency. REUSE_PROFILE=1 prints synchronized CUDA
 encoder/Mamba/decoder times; leave unset for benchmarks. Log: gpu-blocked-mm.log.
+
+Accepted: pack pitched convolution input once, before the im2col tile loop.
+Nsight: repeated scalar copies consumed 33.7% of GPU time. Packing once removes
+up to 55 copies of the same large activation per convolution.
+5x10 s: 18.520 s; 60 s: 28.354 s, RTF 0.4726 (target met).
+All 4,851,000 compared samples are bit-identical. 7 CUDA/CPU unit tests pass.
+Log: gpu-pack-once.log. Bounds-check removal alone was slower and was discarded.
