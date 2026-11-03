@@ -59,6 +59,10 @@ rounding. Encoder 0.172 -> 0.166 s, decoder 0.080 -> 0.076 s.
 Full 130 s gate bit-identical; 60 s=18.215 s (RTF 0.3036); strict clippy passes.
 Log: conv-scale-fused-validation.log. Narrower GEMM tiles and unchecked implicit
 convolution showed no material benefit; discarded.
+Accepted: interleave FP64 moment pieces for coalesced FP32 input reads.
+Encoder 0.166 -> 0.162 s, decoder 0.076 -> 0.074 s. Full 130 s gate
+bit-identical; 60 s=18.133 s (RTF 0.3022); strict CUDA clippy passes.
+Log: moments-coalesced-validation.log.
 
 Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
 Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,

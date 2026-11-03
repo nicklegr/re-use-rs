@@ -225,7 +225,8 @@ mod kernels {
         }
     }
 
-    // Two FP64 moments per 1024-value piece; never materialize an FP64 plane.
+    // Interleave pieces so neighboring threads read neighboring FP32 values.
+    // Retain FP64 accumulation; never materialize an FP64 plane.
     #[cube(launch)]
     pub fn moments(x: &Tensor<f32>, partial: &mut Tensor<f64>, plane: u32, pieces: u32) {
         let at = ABSOLUTE_POS;
@@ -234,14 +235,14 @@ mod kernels {
         }
         let c = at / pieces as usize;
         let piece = at % pieces as usize;
-        let start = piece * 1024usize;
-        let end = (start + 1024usize).min(plane as usize);
         let mut sum = 0.0f64;
         let mut sq = 0.0f64;
-        for i in start..end {
+        let mut i = piece;
+        while i < plane as usize {
             let v = f64::cast_from(x[c * plane as usize + i]);
             sum += v;
             sq += v * v;
+            i += pieces as usize;
         }
         partial[at * 2] = sum;
         partial[at * 2 + 1] = sq;
