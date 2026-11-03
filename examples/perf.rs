@@ -11,6 +11,73 @@ fn pcm16(x: f32) -> i32 {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("signals") {
+        ensure!(args.len() == 3, "perf signals <fixture-dir>");
+        let dir = PathBuf::from(&args[2]);
+        std::fs::create_dir_all(&dir)?;
+        let n = 44100 * 5;
+        let mut seed = 1u32;
+        let quiet: Vec<f32> = (0..n)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                1e-5 * (i as f32 * 0.023).sin() + 1e-8 * ((seed >> 8) as f32 / 16_777_216.0 - 0.5)
+            })
+            .collect();
+        let mut impulse = vec![0.0; n];
+        for (i, value) in [(0, 0.5), (n / 4, 0.75), (n / 2, -0.5), (n - 1, 0.25)] {
+            impulse[i] = value;
+        }
+        for (name, samples) in [
+            ("silence", vec![0.0; n]),
+            ("quiet", quiet),
+            ("impulse", impulse),
+            ("dc", vec![0.25; n]),
+        ] {
+            let path = dir.join(format!("{name}.wav"));
+            ensure!(!path.exists(), "fixture already exists");
+            audio::save_wav(path.to_str().unwrap(), &samples, 44100)?;
+            println!("SIGNAL {} samples={n}", path.display());
+        }
+        return Ok(());
+    }
+    if args.get(1).map(String::as_str) == Some("exec") {
+        ensure!(
+            args.len() == 6,
+            "perf exec <offline.exe> <model> <input.wav> <output.wav>"
+        );
+        ensure!(
+            !std::path::Path::new(&args[5]).exists(),
+            "output already exists"
+        );
+        let (input, sr) = audio::load_wav(&args[4])?;
+        ensure!(
+            sr == 44100 && !input.is_empty(),
+            "expected nonempty 44100 Hz input"
+        );
+        let seconds = input.len() as f64 / sr as f64;
+        let start = Instant::now();
+        let status = std::process::Command::new(&args[2])
+            .env("REUSE_GPU", "cuda")
+            .args([&args[4], &args[5], &args[3], "5", "0.5"])
+            .status()?;
+        let wall = start.elapsed().as_secs_f64();
+        ensure!(status.success(), "offline process failed");
+        let (output, output_sr) = audio::load_wav(&args[5])?;
+        ensure!(
+            output_sr == sr && output.len() == input.len() && output.iter().all(|x| x.is_finite()),
+            "invalid process output"
+        );
+        println!(
+            "PROCESS audio_seconds={seconds:.6} wall_seconds={wall:.6} wall_rtf={:.6} samples={}",
+            wall / seconds,
+            output.len()
+        );
+        ensure!(
+            wall / seconds <= 0.5,
+            "process missed the 0.50 real-time target"
+        );
+        return Ok(());
+    }
     if args.get(1).map(String::as_str) == Some("fixture") {
         ensure!(
             args.len() >= 5,
@@ -106,6 +173,7 @@ fn main() -> Result<()> {
             let mut max_lsb = 0.0f64;
             let mut max_pcm = 0;
             let mut bad = 0usize;
+            let mut bit_changes = 0usize;
             let mut sum_sq = 0.0f64;
             for (&a, &b) in enhanced.iter().zip(&expected) {
                 ensure!(b.is_finite(), "non-finite reference");
@@ -117,9 +185,12 @@ fn main() -> Result<()> {
                 if lsb > 1.0 || pcm > 1 {
                     bad += 1;
                 }
+                if a.to_bits() != b.to_bits() {
+                    bit_changes += 1;
+                }
             }
             all_ok &= bad == 0;
-            println!("CHECK file={} seconds={seconds:.6} elapsed={took:.6} rtf={:.6} max_lsb={max_lsb:.9} max_pcm={max_pcm} rms_lsb={:.9} bad_samples={bad}", input.display(), took/seconds, (sum_sq/enhanced.len() as f64).sqrt());
+            println!("CHECK file={} seconds={seconds:.6} elapsed={took:.6} rtf={:.6} max_lsb={max_lsb:.9} max_pcm={max_pcm} rms_lsb={:.9} bad_samples={bad} bit_changes={bit_changes}", input.display(), took/seconds, (sum_sq/enhanced.len() as f64).sqrt());
         }
     }
     println!("TOTAL audio_seconds={duration:.6} processing_seconds={elapsed:.6} rtf={:.6} accuracy_ok={all_ok}", elapsed/duration);

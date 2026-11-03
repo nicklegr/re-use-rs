@@ -4,6 +4,8 @@
   at 44.1 kHz with the original weights, 5-second chunks and 50% overlap.
   Measure `enhance_chunked`, including overlap and completed GPU work. Also
   report startup separately; never present a single-window rate as chunked RTF.
+  Final acceptance must also time the normal offline executable on 300 seconds,
+  including model load, warmup and WAV input/output, with total wall RTF <= 0.50.
 - Preserve output against the original CUDA implementation at commit 88638f3:
   every sample must differ by <= 1/32768 in float amplitude and <= 1 count after
   signed 16-bit PCM rounding. Check finite values and identical sample counts.

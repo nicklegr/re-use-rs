@@ -79,6 +79,7 @@ mod kernels {
 
     /// 32x64 output tile, 256 threads, eight accumulators per thread.
     /// Preserve sequential FMA within each CPU-sized K=256 block.
+    #[allow(clippy::manual_div_ceil)] // Keep the measured kernel's explicit loop bound.
     #[cube(launch)]
     pub fn blocked_mm(
         a: &Tensor<f32>,

@@ -1,40 +1,54 @@
-# Performance loop
+# Performance loop — target met
 
-Target and acceptance rules: AGENTS.md. Original source: 88638f3.
-Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows.
-Baseline single 5 s window: 6.934 s; chunked 300 s: about 833 s (RTF 2.78).
-CPU encoder/decoder account for 84% of single-window time.
+Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
+Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,
+5 s chunks, 50% overlap; batch worker stopped; existing kernel cache.
 
-Build: ../build-cuda.ps1 (release, --locked, --features cuda).
-Fixtures and immutable baseline binaries/outputs: ../work/perf-loop (not tracked).
-Rust harness: `cargo build --release --features cuda --example perf`, then
-`perf record|check <model> <reference-dir> <input.wav>...`. Uses 5 s / 50%
-chunking, one warmup, reports chunked RTF and fails any sample beyond 1 LSB.
+## Final verification
 
-Accepted: cache-bounded CPU im2col tiles, reusable scratch, contiguous row copies.
-Five original 10 s previews (15 windows): 102.472 -> 93.531 s (-8.7%).
-All 2,205,000 samples bit-identical; 6 CPU unit tests pass. Logs: baseline.log,
-cpu-tiles.log. Short fixtures have only 1.5x work from overlap; long-file target
-still requires further improvement.
+- Normal offline.exe, 300 s corpus (119 windows): inference 147.0 s;
+  complete process including load, warmup and WAV I/O **149.417689 s**, RTF
+  **0.498059**. Valid 13,230,000-sample finite output. Log: production-300s.log.
+- 60 s corpus, three repeats: 28.355048 / 28.389864 / 28.366988 s
+  (RTF 0.472584 / 0.473164 / 0.472783).
+- Five speech/noise previews, silence, quiet, impulses, DC, and three 60 s runs:
+  11,025,000 sample comparisons; max float difference 0, max PCM16 difference 0,
+  bit changes 0. Log: final-validation.log. 300 s run checks throughput/validity;
+  its full waveform was not separately compared with a 300 s original reference.
+- cargo fmt --check; strict clippy --all-targets --release with and without
+  cuda; CPU tests and 7 CUDA-enabled unit tests pass.
 
-Accepted: CUDA encoder/decoders, strict FP32 GEMM, FP64 norm moments, GPU-resident
-activations through Mamba. Preserve CPU's K=256 accumulation blocks and separate
-norm multiply/add rounding. 5x10 s: 93.531 -> 27.978 s; all samples bit-identical.
-CUDA GEMM/norm unit test passes. Log: gpu-conv-3.log. Long-file target remains.
-Rejected prototype: unblocked FP32 GEMM/fused norm changed up to 50 LSB because
-small encoder differences affect the original Mamba's TF32 rounding.
-Long fixture: `perf fixture ../work/perf-loop/corpus-60s.wav 60 <five previews>`.
-It concatenates/repeats original samples in Rust, with no resampling. Preserve
-its reference using the immutable baseline-perf.exe in record mode.
-Original 60 s reference: 159.093 s, RTF 2.652.
-Accepted: shared-memory FP32 GEMM with CPU K=256 rounding in one launch.
-5x10 s: 27.978 -> 27.305 s; 60 s: 41.835 s (RTF 0.697), all samples identical.
-Removed the direct cubek dependency. REUSE_PROFILE=1 prints synchronized CUDA
-encoder/Mamba/decoder times; leave unset for benchmarks. Log: gpu-blocked-mm.log.
+## Accepted improvements (separate commits)
 
-Accepted: pack pitched convolution input once, before the im2col tile loop.
-Nsight: repeated scalar copies consumed 33.7% of GPU time. Packing once removes
-up to 55 copies of the same large activation per convolution.
-5x10 s: 18.520 s; 60 s: 28.354 s, RTF 0.4726 (target met).
-All 4,851,000 compared samples are bit-identical. 7 CUDA/CPU unit tests pass.
-Log: gpu-pack-once.log. Bounds-check removal alone was slower and was discarded.
+| Change | Five 10 s previews, total processing |
+|---|---:|
+| Original | 102.472 s |
+| Cache-bounded CPU im2col, scratch reuse, contiguous row copies | 93.531 s |
+| CUDA encoder/decoders and GPU-resident activations | 27.978 s |
+| Shared-memory FP32 GEMM with exact K=256 rounding | 27.305 s |
+| Pack pitched input once per convolution, not per tile | 18.520 s |
+
+Original 60 s reference: 159.093 s. Earlier production 300 s: about 833 s.
+Nsight identified repeated pitched-to-contiguous copies as 33.7% of GPU time.
+Packing once removes up to 55 copies of a large activation per convolution.
+All accepted variants passed original-reference comparisons.
+
+Numerics: preserve matrixmultiply's 256-wide K blocks and sequential FP32 FMA;
+use FP64 normalization moments and separate FP32 multiply/add rounding.
+Unblocked GEMM/fused normalization changed up to 50 PCM16 LSB through later
+Mamba TF32 rounding, so was rejected. Bounds-check removal alone was slower
+and was discarded. Keep the original Mamba arithmetic.
+
+## Reproduce
+
+Build: ../build-cuda.ps1. Also build --release --features cuda --example perf.
+All fixture/baseline binaries, WAVs, logs: ../work/perf-loop (not tracked).
+
+- `perf record|check <model> <reference-dir> <input.wav>...`: chunked RTF and
+  per-sample float/PCM16/bit comparison; never overwrite immutable references.
+- `perf fixture <out.wav> <seconds> <input.wav>...`: concatenate/repeat without
+  resampling. corpus-60s uses the five previews; corpus-300s repeats corpus-60s.
+- `perf signals <dir>`: deterministic 44.1 kHz edge fixtures.
+- `perf exec <offline.exe> <model> <input.wav> <out.wav>`: full process wall time,
+  output validity, and a failing exit code if RTF > 0.50.
+- REUSE_PROFILE=1: synchronized encoder/Mamba/decoder times; unset for timing.
