@@ -231,6 +231,7 @@ mod kernel {
         #[comptime] d_inner: u32,
         #[comptime] dt_rank: u32,
         #[comptime] reverse: u32,
+        #[comptime] shared_coefficients: bool,
         #[define(F)] _dtype: ElemType,
     ) {
         let di = d_inner as usize;
@@ -244,6 +245,9 @@ mod kernel {
         let mut s = Array::new(16usize);
         let mut ac = Array::new(16usize);
         let mut dt = Array::new(rank);
+        // Each thread owns one column: no barriers are needed. Keeping A in
+        // shared memory frees registers without changing the scan arithmetic.
+        let mut shared_a = Shared::<[F]>::new_slice(16usize * 32usize);
         #[unroll]
         for k in 0..rank {
             dt[k] = dt_w[c * rank + k];
@@ -251,7 +255,11 @@ mod kernel {
         #[unroll]
         for n in 0..16usize {
             s[n] = F::new(0.0f32);
-            ac[n] = a[c * 16 + n];
+            if shared_coefficients {
+                shared_a[n * 32usize + UNIT_POS as usize] = a[c * 16 + n];
+            } else {
+                ac[n] = a[c * 16 + n];
+            }
         }
         let (bias, skip) = (dt_b[c], d[c]);
         for i in 0..len {
@@ -275,7 +283,12 @@ mod kernel {
             let mut acc = F::new(0.0f32);
             #[unroll]
             for n in 0..16usize {
-                let decay = (delta * ac[n]).exp();
+                let coeff = if shared_coefficients {
+                    shared_a[n * 32usize + UNIT_POS as usize]
+                } else {
+                    ac[n]
+                };
+                let decay = (delta * coeff).exp();
                 s[n] = decay * s[n] + dx * dbl[row * nd + rank + n];
                 acc += s[n] * dbl[row * nd + rank + 16 + n];
             }
@@ -420,6 +433,7 @@ impl MambaOps for CubeBackend {
             di as u32,
             rank as u32,
             reverse as u32,
+            client.name() == "cuda",
             dtype,
         );
         y

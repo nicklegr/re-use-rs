@@ -40,6 +40,12 @@ bit-identical. Log: matmul-tiles-validation.log. Alternative raw MMA exceeded
 2 LSB and was rejected. Double-buffering and larger row tiles were slower.
 Two-window retry after implicit convolution: 60 s=21.299 s, no benefit;
 discarded (window-pipeline-implicit-probe.log).
+Accepted: cache scan A coefficients in per-thread columns of CUDA shared memory
+to free registers, with identical operations. Balanced register/shared/shared-dt/
+register probes: Mamba 0.548/0.539/0.539/0.549 s. Keep dt in registers.
+Full 130 s gate bit-identical; 60 s=19.828 s (RTF 0.3305); strict clippy passes.
+Log: scan-shared-validation.log. Larger convolution tiles offered little gain
+and excessive kernel compilation time (up to 42 s); not adopted.
 
 Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
 Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,
