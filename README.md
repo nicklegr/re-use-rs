@@ -14,6 +14,24 @@ NVIDIA's RE-USE speech enhancement models (Mamba) in plain Rust, 8–48 kHz mono
 | Apple M3, 16 kHz | 8.4–14.7 ms per frame (4–8 layers) | 0.9× real time CPU, 2.4× GPU |
 | Weights license | non-commercial | OpenMDW-1.1, commercial use allowed |
 
+## Windows fork
+
+This fork tunes the `Offline` implementation for Windows with NVIDIA CUDA.
+The tuned implementation is **bit-accurate to the original CUDA implementation**
+on the validation fixtures described below.
+
+Windows, Intel Core i5-12400, NVIDIA GeForce RTX 5060 Ti 16 GB, CUDA 13; offline
+RE-USE model at 44.1 kHz, 5 s chunks with 50% overlap:
+
+| 300 s recording | Processing time | Speed |
+|---|---|---|
+| `offline` executable, including model load, GPU warmup and WAV I/O | **106.44 s** | **2.82× real time** |
+
+A separate 130 s set of speech/noise and edge-case fixtures produced **bit-for-bit identical output** to the original CUDA implementation.
+See [PERFORMANCE.md](PERFORMANCE.md) for measurement details.
+
+All optimizations in this fork were performed by GPT-6.1 Sol (High).
+
 ## Demo
 
 Real-time model, 8 layers, CPU:
@@ -168,12 +186,13 @@ cargo run --release --example bench -- noisy.wav 8 12
 
 ## Limitations
 
-- Only measured on an Apple M3. Without Accelerate (`matrixmultiply`), 8 layers take 21.4 ms per
+- The real-time benchmarks above were measured on an Apple M3. Without Accelerate (`matrixmultiply`), 8 layers take 21.4 ms per
   frame on the same machine, so 4–6 layers is safer on other platforms.
 - 48 kHz is about 3× the work of 16 kHz: 19.6 ms per frame with 4 layers, right at the limit. For
   live audio, resample to 16 kHz.
 - The offline models are for files: not real time on the CPU, and they need the input up front.
-- The GPU features build for Metal, Vulkan, wgpu, CUDA and ROCm, but have only been run on Metal.
+- The GPU features build for Metal, Vulkan, wgpu, CUDA and ROCm; the upstream benchmarks above use
+  Metal, and this fork's `Offline` tuning was measured with CUDA on Windows.
 - Some recordings are not cleaned well by the real-time model. In my tests these were mostly
   recordings where the background noise also has other people talking in it. The offline models
   clean them much better, almost completely, so use `Offline` for these:
