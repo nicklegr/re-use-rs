@@ -11,6 +11,32 @@ fn pcm16(x: f32) -> i32 {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("fixture") {
+        ensure!(
+            args.len() >= 5,
+            "perf fixture <out.wav> <seconds> <input.wav>..."
+        );
+        ensure!(
+            !std::path::Path::new(&args[2]).exists(),
+            "fixture already exists"
+        );
+        let seconds: usize = args[3].parse()?;
+        ensure!((1..=3600).contains(&seconds), "invalid fixture duration");
+        let mut corpus = Vec::new();
+        for input in &args[4..] {
+            let (samples, sr) = audio::load_wav(input)?;
+            ensure!(
+                sr == 44100 && !samples.is_empty(),
+                "expected nonempty 44100 Hz input"
+            );
+            corpus.extend_from_slice(&samples);
+        }
+        let wanted = seconds * 44100;
+        let samples: Vec<f32> = corpus.iter().copied().cycle().take(wanted).collect();
+        audio::save_wav(&args[2], &samples, 44100)?;
+        println!("FIXTURE samples={wanted} seconds={seconds}");
+        return Ok(());
+    }
     ensure!(
         args.len() >= 5,
         "perf <record|check> <model> <reference-dir> <input.wav>..."

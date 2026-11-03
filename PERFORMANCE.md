@@ -23,3 +23,6 @@ norm multiply/add rounding. 5x10 s: 93.531 -> 27.978 s; all samples bit-identica
 CUDA GEMM/norm unit test passes. Log: gpu-conv-3.log. Long-file target remains.
 Rejected prototype: unblocked FP32 GEMM/fused norm changed up to 50 LSB because
 small encoder differences affect the original Mamba's TF32 rounding.
+Long fixture: `perf fixture ../work/perf-loop/corpus-60s.wav 60 <five previews>`.
+It concatenates/repeats original samples in Rust, with no resampling. Preserve
+its reference using the immutable baseline-perf.exe in record mode.
