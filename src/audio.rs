@@ -1,4 +1,5 @@
 use eyre::{eyre, Result};
+use rayon::prelude::*;
 use realfft::RealFftPlanner;
 use std::f32::consts::PI;
 
@@ -64,30 +65,41 @@ pub fn stft(
 
     let mut planner = RealFftPlanner::<f32>::new();
     let r2c = planner.plan_fft_forward(n_fft);
-    let mut input_buf = vec![0.0f32; n_fft];
-    let mut output_buf = r2c.make_output_vec();
-    let mut scratch = r2c.make_scratch_vec();
-
     let mut mag = vec![vec![0.0f32; num_frames]; freq_bins];
     let mut phase = vec![vec![0.0f32; num_frames]; freq_bins];
-
-    for t in 0..num_frames {
-        let start = t * hop_size;
-        input_buf.fill(0.0);
-        for i in 0..win_size.min(padded.len() - start) {
-            input_buf[i] = padded[start + i] * window[i];
-        }
-
-        r2c.process_with_scratch(&mut input_buf, &mut output_buf, &mut scratch)
-            .map_err(|e| eyre!("FFT failed: {e}"))?;
-
-        for k in 0..freq_bins {
-            let re = output_buf[k].re;
-            let im = output_buf[k].im;
-            mag[k][t] = (re * re + im * im).sqrt();
-            phase[k][t] = im.atan2(re);
-        }
-    }
+    let spectra: Vec<Vec<(f32, f32)>> = (0..num_frames)
+        .into_par_iter()
+        .map_init(
+            || {
+                (
+                    r2c.make_input_vec(),
+                    r2c.make_output_vec(),
+                    r2c.make_scratch_vec(),
+                )
+            },
+            |(input, output, scratch), t| -> Result<_> {
+                let start = t * hop_size;
+                input.fill(0.0);
+                for i in 0..win_size.min(padded.len() - start) {
+                    input[i] = padded[start + i] * window[i];
+                }
+                r2c.process_with_scratch(input, output, scratch)
+                    .map_err(|e| eyre!("FFT failed: {e}"))?;
+                Ok(output
+                    .iter()
+                    .map(|v| ((v.re * v.re + v.im * v.im).sqrt(), v.im.atan2(v.re)))
+                    .collect())
+            },
+        )
+        .collect::<Result<_>>()?;
+    mag.par_iter_mut()
+        .zip(phase.par_iter_mut())
+        .enumerate()
+        .for_each(|(k, (mag, phase))| {
+            for (t, spectrum) in spectra.iter().enumerate() {
+                (mag[t], phase[t]) = spectrum[k];
+            }
+        });
 
     Ok((mag, phase))
 }
@@ -108,31 +120,31 @@ pub fn istft(
 
     let mut planner = RealFftPlanner::<f32>::new();
     let c2r = planner.plan_fft_inverse(n_fft);
-    let mut spec_buf = c2r.make_input_vec();
-    let mut time_buf = vec![0.0f32; n_fft];
-    let mut scratch = c2r.make_scratch_vec();
+    let mut frames = vec![vec![0.0f32; n_fft]; num_frames];
+    frames.par_iter_mut().enumerate().try_for_each_init(
+        || (c2r.make_input_vec(), c2r.make_scratch_vec()),
+        |(spec_buf, scratch), (t, time_buf)| -> Result<()> {
+            for k in 0..freq_bins {
+                let m = mag[k][t];
+                let p = phase[k][t];
+                spec_buf[k] = realfft::num_complex::Complex::new(m * p.cos(), m * p.sin());
+            }
+            spec_buf[0].im = 0.0;
+            if freq_bins > 1 {
+                spec_buf[freq_bins - 1].im = 0.0;
+            }
+            c2r.process_with_scratch(spec_buf, time_buf, scratch)
+                .map_err(|e| eyre!("IFFT failed: {e}"))
+        },
+    )?;
 
     // Output length includes center padding on both sides
     let out_len = n_fft / 2 + (num_frames - 1) * hop_size + n_fft / 2;
     let mut output = vec![0.0f32; out_len];
     let mut window_sum = vec![0.0f32; out_len];
 
-    for t in 0..num_frames {
-        // Build complex spectrum
-        for k in 0..freq_bins {
-            let m = mag[k][t];
-            let p = phase[k][t];
-            spec_buf[k] = realfft::num_complex::Complex::new(m * p.cos(), m * p.sin());
-        }
-        // DC and Nyquist bins must be real for realfft
-        spec_buf[0].im = 0.0;
-        if freq_bins > 1 {
-            spec_buf[freq_bins - 1].im = 0.0;
-        }
-
-        c2r.process_with_scratch(&mut spec_buf, &mut time_buf, &mut scratch)
-            .map_err(|e| eyre!("IFFT failed: {e}"))?;
-
+    // Keep the original frame order for all overlap additions.
+    for (t, time_buf) in frames.iter().enumerate() {
         let offset = t * hop_size;
         // realfft returns unnormalized output, divide by n_fft
         let norm = 1.0 / n_fft as f32;

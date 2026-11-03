@@ -486,18 +486,19 @@ impl Offline {
         }
         let (n_fft, hop) = Self::stft_sizes(sample_rate);
         let (mut mag, pha) = stft(samples, n_fft, hop, n_fft)?;
-        mag.iter_mut().flatten().for_each(|m| *m = m.ln_1p());
+        mag.par_iter_mut()
+            .for_each(|row| row.iter_mut().for_each(|m| *m = m.ln_1p()));
         let (mut mag, pha) = self.forward(&mag, &pha);
         // Frames where most bins come out as zero are cleared, as NVIDIA's inference does.
         let (bins, frames) = (mag.len(), mag[0].len());
         let cleared: Vec<bool> = (0..frames)
             .map(|t| mag.iter().filter(|row| row[t] <= 0.0).count() * 2 > bins)
             .collect();
-        for row in &mut mag {
+        mag.par_iter_mut().for_each(|row| {
             for (m, &clear) in row.iter_mut().zip(&cleared) {
                 *m = if clear { 0.0 } else { m.max(0.0).exp_m1() };
             }
-        }
+        });
         let mut out = istft(&mag, &pha, n_fft, hop, n_fft)?;
         out.resize(samples.len(), 1e-8);
         Ok(out)
@@ -560,8 +561,8 @@ fn crop_output(
             .collect()
     };
     let phase: Vec<f32> = pha[1]
-        .iter()
-        .zip(&pha[0])
+        .par_iter()
+        .zip(pha[0].par_iter())
         .map(|(i, r)| i.atan2(*r))
         .collect();
     (crop(&mag[0]), crop(&phase))

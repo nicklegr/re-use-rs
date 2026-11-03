@@ -46,6 +46,10 @@ register probes: Mamba 0.548/0.539/0.539/0.549 s. Keep dt in registers.
 Full 130 s gate bit-identical; 60 s=19.828 s (RTF 0.3305); strict clippy passes.
 Log: scan-shared-validation.log. Larger convolution tiles offered little gain
 and excessive kernel compilation time (up to 42 s); not adopted.
+Accepted: parallel independent STFT/IFFT frames and CPU spectral transforms.
+Keep both IFFT and chunk overlap-add in original order. 60 s=18.796 s
+(RTF 0.3133); all 130 s reference fixtures bit-identical. Strict CUDA clippy
+and CPU unit tests pass. Log: cpu-spectral-validation.log.
 
 Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
 Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,
