@@ -65,6 +65,7 @@ impl GpuDevice {
 
 #[backend_extension(Cube)]
 pub trait MambaOps: Backend {
+    fn project(a: FloatTensor<Self>, b: FloatTensor<Self>) -> FloatTensor<Self>;
     #[allow(clippy::too_many_arguments)]
     fn finish_block(
         fw: FloatTensor<Self>,
@@ -290,6 +291,16 @@ const BLOCK: u32 = 256;
 const SCAN_BLOCK: u32 = 32;
 
 impl MambaOps for CubeBackend {
+    fn project(a: CubeTensor, b: CubeTensor) -> CubeTensor {
+        if a.client.name() == "cuda" {
+            if let Ok(out) = cuda_project(a.clone(), b.clone()) {
+                return out;
+            }
+        }
+        let dtype = a.dtype;
+        burn_cubecl::kernel::matmul::matmul(a, b, None, Default::default(), dtype)
+            .expect("Mamba matmul")
+    }
     fn finish_block(
         fw: CubeTensor,
         bw: CubeTensor,
@@ -426,6 +437,111 @@ fn tensor<const D: usize>(w: &Weights, name: &str, device: &Device) -> Result<Te
     ))
 }
 
+fn project(a: Tensor<2>, b: Tensor<2>) -> Tensor<2> {
+    Tensor::from_dispatch(<Dispatch as MambaOps>::project(
+        a.into_dispatch(),
+        b.into_dispatch(),
+    ))
+}
+
+// Keep Burn's TF32 CMMA instruction and K iteration order, but use twice as
+// many row partitions and tilewise loading. Launch the prepared blueprint
+// directly: CubeK's forced-strategy path otherwise resets its TF32 types.
+fn cuda_project(
+    a: CubeTensor,
+    b: CubeTensor,
+) -> Result<CubeTensor, cubek::matmul::definition::MatmulSetupError> {
+    use cubek::matmul::{
+        definition::{AvailableVectorSizes, MatmulElems, MatmulGlobalElems, MatmulProblem},
+        multi_level::{
+            args::{ConcreteInputsFactory, ConcreteOutputFactory, InputArg, OutputArg, TensorArgs},
+            components::{
+                global::read::sync_full_tilewise::SyncFullTilewiseLoading, tile::TileMatmulKind,
+            },
+            launch_kernel,
+            routines::{
+                batch::simple::SimpleAlgorithm, infer_blueprint_plane, PlaneTilingBlueprintOptions,
+            },
+            tile::{ColMajorTilingOrder, RowMajorTilingOrder},
+            BatchMatmulRoutine, ExpandInfo,
+        },
+    };
+    type Algo = SimpleAlgorithm<
+        SyncFullTilewiseLoading<ColMajorTilingOrder>,
+        SyncFullTilewiseLoading<RowMajorTilingOrder>,
+    >;
+    let out = empty_device_dtype(
+        a.client.clone(),
+        a.device.clone(),
+        [a.meta.shape()[0], b.meta.shape()[1]].into(),
+        a.dtype,
+    );
+    let dtype = burn::backend::cubecl::dtype_to_storage_type(a.dtype);
+    let globals = MatmulGlobalElems {
+        lhs: dtype,
+        rhs: dtype,
+        out: dtype,
+    };
+    let problem = MatmulProblem::from_shapes_and_strides(
+        a.meta.shape().clone(),
+        b.meta.shape().clone(),
+        out.meta.shape().clone(),
+        a.meta.strides().clone(),
+        b.meta.strides().clone(),
+        out.meta.strides().clone(),
+        globals.clone(),
+        cubecl::ir::AddressType::U32,
+        None,
+        None,
+    )?;
+    let vectors = AvailableVectorSizes::from_type_sizes(&out.client, 4, 4, 4)
+        .filter_lhs_with_tensor(&problem.lhs_strides, &problem.lhs_shape, problem.lhs_layout)
+        .filter_rhs_with_tensor(&problem.rhs_strides, &problem.rhs_shape, problem.rhs_layout)
+        .filter_out_with_tensor(&problem.out_strides, &problem.out_shape)
+        .pick_max()?;
+    let (mut blueprint, dtypes) = infer_blueprint_plane(
+        TileMatmulKind::Cmma,
+        &out.client,
+        &problem,
+        32,
+        MatmulElems::from_globals(&globals),
+        &vectors,
+        PlaneTilingBlueprintOptions::default(),
+    )?;
+    blueprint.tiling_scheme.stage_size.m *= 2;
+    blueprint.check_m_bounds = problem.m
+        % blueprint
+            .tiling_scheme
+            .elements_per_global_partition_along_m() as usize
+        != 0;
+    let settings = <Algo as BatchMatmulRoutine<()>>::device_settings(&out.client, vectors);
+    let info = <Algo as BatchMatmulRoutine<()>>::prepare(
+        &problem,
+        &settings,
+        ExpandInfo {
+            blueprint,
+            dtypes: dtypes.clone(),
+        },
+    )?;
+    let input = <InputArg<TensorArgs> as ConcreteInputsFactory<Algo>>::create(
+        cubek::std::InputBinding::new(a.binding(), dtype),
+        cubek::std::InputBinding::new(b.binding(), dtype),
+        &info.blueprint,
+        &problem,
+        &info.vector_sizes,
+        &dtypes,
+    );
+    let output = <OutputArg<TensorArgs> as ConcreteOutputFactory<Algo>>::create(
+        out.clone().binding(),
+        &info.blueprint,
+        &problem,
+        &info.vector_sizes,
+        &dtypes,
+    );
+    launch_kernel::<TensorArgs, Algo>(&out.client, input, output, (), info)?;
+    Ok(out)
+}
+
 /// `[out, in]` weight as `[in, out]`, for `x.matmul(w)`.
 fn linear(w: &Weights, name: &str, device: &Device) -> Result<Tensor<2>> {
     Ok(tensor::<2>(w, name, device)?.transpose())
@@ -464,7 +580,7 @@ impl Mamba {
 
     /// `x` is `[batch·len, d_model]`, sequence-major.
     fn forward(&self, x: Tensor<2>, batch: usize, reverse: bool) -> Tensor<2> {
-        let xz = x.matmul(self.in_proj.clone());
+        let xz = project(x, self.in_proj.clone());
         let xc = Tensor::<2>::from_dispatch(<Dispatch as MambaOps>::mamba_conv(
             xz.clone().into_dispatch(),
             self.conv_w.clone().into_dispatch(),
@@ -472,7 +588,7 @@ impl Mamba {
             batch,
             reverse,
         ));
-        let dbl = xc.clone().matmul(self.x_proj.clone());
+        let dbl = project(xc.clone(), self.x_proj.clone());
         let y = Tensor::<2>::from_dispatch(<Dispatch as MambaOps>::mamba_scan(
             xz.into_dispatch(),
             xc.into_dispatch(),
@@ -484,7 +600,7 @@ impl Mamba {
             batch,
             reverse,
         ));
-        y.matmul(self.out_proj.clone())
+        project(y, self.out_proj.clone())
     }
 }
 
@@ -535,11 +651,16 @@ impl BiMamba {
     fn forward(&self, x: Tensor<2>, batch: usize) -> Tensor<2> {
         if let Some([fw_stream, bw_stream]) = self.streams {
             let fw = fw_stream.executes(|| {
-                (self.forward.forward(x.clone(), batch, false) + x.clone())
-                    .matmul(self.proj_fw.clone())
+                project(
+                    self.forward.forward(x.clone(), batch, false) + x.clone(),
+                    self.proj_fw.clone(),
+                )
             });
             let bw = bw_stream.executes(|| {
-                (self.backward.forward(x.clone(), batch, true) + x).matmul(self.proj_bw.clone())
+                project(
+                    self.backward.forward(x.clone(), batch, true) + x,
+                    self.proj_bw.clone(),
+                )
             });
             // CubeCL tracks cross-stream dependencies of these tensors. Keep
             // the projection sum and normalization in their original order.
@@ -557,10 +678,16 @@ impl BiMamba {
     fn forward_transposed(&self, x: Tensor<2>, batch: usize) -> Tensor<2> {
         let [fw_stream, bw_stream] = self.streams.expect("CUDA direction streams");
         let fw = fw_stream.executes(|| {
-            (self.forward.forward(x.clone(), batch, false) + x.clone()).matmul(self.proj_fw.clone())
+            project(
+                self.forward.forward(x.clone(), batch, false) + x.clone(),
+                self.proj_fw.clone(),
+            )
         });
         let bw = bw_stream.executes(|| {
-            (self.backward.forward(x.clone(), batch, true) + x.clone()).matmul(self.proj_bw.clone())
+            project(
+                self.backward.forward(x.clone(), batch, true) + x.clone(),
+                self.proj_bw.clone(),
+            )
         });
         Tensor::from_dispatch(<Dispatch as MambaOps>::finish_block(
             fw.into_dispatch(),
@@ -653,5 +780,45 @@ impl Model {
             x = swap(x, time, freq);
         }
         x
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cuda_project_matches_original_cmma() {
+        if std::env::var("REUSE_GPU").as_deref() != Ok("cuda") {
+            return;
+        }
+        let device = GpuDevice::Cuda(0).device().unwrap();
+        for (rows, k, n) in [(129, 64, 512), (257, 256, 36), (130, 256, 64)] {
+            let a: Vec<f32> = (0..rows * k)
+                .map(|i| ((i * 17 % 127) as f32 - 63.0) / 127.0)
+                .collect();
+            let b: Vec<f32> = (0..n * k)
+                .map(|i| ((i * 7 % 41) as f32 - 20.0) / 128.0)
+                .collect();
+            let a = Tensor::<2>::from_data(TensorData::new(a, [rows, k]), &device);
+            let b = Tensor::<2>::from_data(TensorData::new(b, [n, k]), &device).transpose();
+            let expected = a
+                .clone()
+                .matmul(b.clone())
+                .into_data()
+                .try_into_vec::<f32>()
+                .unwrap();
+            let actual = Tensor::<2>::from_primitive::<CubeBackend>(
+                cuda_project(
+                    a.try_into_primitive::<CubeBackend>().unwrap(),
+                    b.try_into_primitive::<CubeBackend>().unwrap(),
+                )
+                .unwrap(),
+            )
+            .into_data()
+            .try_into_vec::<f32>()
+            .unwrap();
+            assert_eq!(actual, expected);
+        }
     }
 }

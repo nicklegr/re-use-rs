@@ -44,9 +44,15 @@ default-features = false
 features = ["std"]
 optional = true
 
+[dependencies.cubek]
+version = "0.3.1"
+default-features = false
+features = ["std", "stdlib", "matmul", "matmul-multi-level"]
+optional = true
+
 [features]
 # The offline model on a GPU with Burn. Enable one or more backends:
-gpu = ["dep:burn", "dep:burn-cubecl", "dep:cubecl", "dep:cubecl-environment"]
+gpu = ["dep:burn", "dep:burn-cubecl", "dep:cubecl", "dep:cubecl-environment", "dep:cubek"]
 # wgpu on whatever the system offers (Metal, Vulkan, DX12). Use this only if your hw very old and doesn't work with vulkan. For apple, use directly metal.
 wgpu = ["gpu", "burn/wgpu"]
 metal = ["gpu", "burn/metal"]

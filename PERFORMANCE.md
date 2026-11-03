@@ -32,6 +32,14 @@ Encoder 0.281 -> 0.173 s, decoder 0.112 -> 0.080 s; 60 s=21.172 s
 including CPU-GEMM comparison of implicit convolution padding/stride/dilation.
 Log: implicit-conv-validation.log. A two-window pipeline before this change
 reached VRAM capacity and slowed 10 s to 17.94 s; discarded.
+Accepted: Mamba CMMA uses tilewise loading and twice the row partitions,
+with the original TF32 instruction and K traversal. CUDA-only; unsupported
+configurations and other runtimes use Burn's original matmul strategy.
+Mamba 0.595 -> 0.549 s; 60 s=20.706 s (RTF 0.3451), full 130 s gate
+bit-identical. Log: matmul-tiles-validation.log. Alternative raw MMA exceeded
+2 LSB and was rejected. Double-buffering and larger row tiles were slower.
+Two-window retry after implicit convolution: 60 s=21.299 s, no benefit;
+discarded (window-pipeline-implicit-probe.log).
 
 Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
 Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,

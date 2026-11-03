@@ -1922,6 +1922,7 @@ dependencies = [
  "cubek-random",
  "cubek-reduce",
  "cubek-std",
+ "cubek-tile",
 ]
 
 [[package]]
@@ -4999,6 +5000,7 @@ dependencies = [
  "burn-cubecl",
  "cubecl",
  "cubecl-environment",
+ "cubek",
  "eyre",
  "hound",
  "matrixmultiply",
