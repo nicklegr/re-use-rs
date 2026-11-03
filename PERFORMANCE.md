@@ -25,6 +25,13 @@ All 130 s reference fixtures bit-identical; strict CUDA clippy passes.
 Log: mamba-finish-validation.log.
 Rejected Mamba probes: unchecked indexing and padded projection width offered
 no speedup; separate delta/gate precomputation slowed Mamba to 0.713/0.759 s.
+Accepted: implicit CUDA convolution loads source values into shared GEMM tiles
+without materializing im2col or concatenating output tiles. Same K=256 FMA order.
+Encoder 0.281 -> 0.173 s, decoder 0.112 -> 0.080 s; 60 s=21.172 s
+(RTF 0.3529). Full 130 s gate bit-identical; strict CUDA clippy and 8 tests pass,
+including CPU-GEMM comparison of implicit convolution padding/stride/dilation.
+Log: implicit-conv-validation.log. A two-window pipeline before this change
+reached VRAM capacity and slowed 10 s to 17.94 s; discarded.
 
 Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
 Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,

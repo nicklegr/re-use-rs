@@ -13,9 +13,9 @@ use eyre::Result;
 
 #[backend_extension(Cube)]
 trait ConvOps: Backend {
-    fn conv_input(x: FloatTensor<Self>) -> FloatTensor<Self>;
     #[allow(clippy::too_many_arguments)]
-    fn columns(
+    fn implicit_conv(
+        w: FloatTensor<Self>,
         x: FloatTensor<Self>,
         time: usize,
         freq: usize,
@@ -27,9 +27,9 @@ trait ConvOps: Backend {
         st: usize,
         sf: usize,
         fo: usize,
-        first: usize,
-        count: usize,
+        positions: usize,
     ) -> FloatTensor<Self>;
+    fn conv_input(x: FloatTensor<Self>) -> FloatTensor<Self>;
     fn strict_mm(a: FloatTensor<Self>, b: FloatTensor<Self>) -> FloatTensor<Self>;
     fn norm_act(
         x: FloatTensor<Self>,
@@ -41,41 +41,6 @@ trait ConvOps: Backend {
 
 mod kernels {
     use cubecl::prelude::*;
-
-    #[cube(launch)]
-    pub fn columns(
-        x: &Tensor<f32>,
-        y: &mut Tensor<f32>,
-        time: u32,
-        freq: u32,
-        kt: u32,
-        kf: u32,
-        dilation: u32,
-        pt: u32,
-        pf: u32,
-        st: u32,
-        sf: u32,
-        fo: u32,
-        first: u32,
-        count: u32,
-    ) {
-        let at = ABSOLUTE_POS;
-        if at >= y.len() {
-            terminate!();
-        }
-        let pos = first as usize + at % count as usize;
-        let k = at / count as usize;
-        let b = k % kf as usize;
-        let a = k / kf as usize % kt as usize;
-        let ci = k / (kt * kf) as usize;
-        let ti = ((pos / fo as usize) * st as usize + a * dilation as usize) as i32 - pt as i32;
-        let fi = ((pos % fo as usize) * sf as usize + b) as i32 - pf as i32;
-        let mut v = 0.0f32;
-        if ti >= 0 && ti < time as i32 && fi >= 0 && fi < freq as i32 {
-            v = x[(ci * time as usize + ti as usize) * freq as usize + fi as usize];
-        }
-        y[at] = v;
-    }
 
     /// 32x64 output tile, 256 threads, eight accumulators per thread.
     /// Preserve sequential FMA within each CPU-sized K=256 block.
@@ -131,6 +96,106 @@ mod kernels {
                     let mut v = 0.0f32;
                     if kk < k && col < n {
                         v = b[kk * n + col];
+                    }
+                    sb[at] = v;
+                }
+                sync_cube();
+                #[unroll]
+                for kk in 0..32usize {
+                    let bv = sb[kk * 64usize + tx];
+                    #[unroll]
+                    for r in 0..8usize {
+                        partial[r] = fma(sa[(ty + r * 4usize) * 32usize + kk], bv, partial[r]);
+                    }
+                }
+                sync_cube();
+            }
+            #[unroll]
+            for r in 0..8usize {
+                total[r] += partial[r];
+            }
+        }
+        #[unroll]
+        for r in 0..8usize {
+            let row = row0 + ty + r * 4usize;
+            let col = col0 + tx;
+            if row < m && col < n {
+                out[row * n + col] = total[r];
+            }
+        }
+    }
+
+    /// Load im2col values directly into the GEMM's shared tile. The FP32 FMA
+    /// sequence and 256-wide partial sums are identical to `blocked_mm`.
+    #[cube(launch)]
+    pub fn implicit_conv(
+        a: &Tensor<f32>,
+        x: &Tensor<f32>,
+        out: &mut Tensor<f32>,
+        #[comptime] m: usize,
+        #[comptime] n: usize,
+        #[comptime] k: usize,
+        #[comptime] time: usize,
+        #[comptime] freq: usize,
+        #[comptime] kt: usize,
+        #[comptime] kf: usize,
+        #[comptime] dilation: usize,
+        #[comptime] pt: usize,
+        #[comptime] pf: usize,
+        #[comptime] st: usize,
+        #[comptime] sf: usize,
+        #[comptime] fo: usize,
+    ) {
+        let tid = UNIT_POS as usize;
+        let tx = tid % 64usize;
+        let ty = tid / 64usize;
+        let row0 = CUBE_POS_Y as usize * 32usize;
+        let col0 = CUBE_POS_X as usize * 64usize;
+        let mut sa = Shared::<[f32]>::new_slice(1024usize);
+        let mut sb = Shared::<[f32]>::new_slice(2048usize);
+        let mut total = Array::<f32>::new(8usize);
+        #[unroll]
+        for r in 0..8usize {
+            total[r] = 0.0f32;
+        }
+        for block in 0..k.div_ceil(256usize) {
+            let mut partial = Array::<f32>::new(8usize);
+            #[unroll]
+            for r in 0..8usize {
+                partial[r] = 0.0f32;
+            }
+            for tile in 0..8usize {
+                let k0 = block * 256usize + tile * 32usize;
+                #[unroll]
+                for i in 0..4usize {
+                    let at = tid + i * 256usize;
+                    let row = row0 + at / 32usize;
+                    let kk = k0 + at % 32usize;
+                    let mut v = 0.0f32;
+                    if row < m && kk < k {
+                        v = a[row * k + kk];
+                    }
+                    sa[at] = v;
+                }
+                #[unroll]
+                for i in 0..8usize {
+                    let at = tid + i * 256usize;
+                    let kk = k0 + at / 64usize;
+                    let col = col0 + at % 64usize;
+                    let b = kk % kf;
+                    let a = kk / kf % kt;
+                    let ci = kk / (kt * kf);
+                    let ti = ((col / fo) * st + a * dilation) as i32 - pt as i32;
+                    let fi = ((col % fo) * sf + b) as i32 - pf as i32;
+                    let mut v = 0.0f32;
+                    if kk < k
+                        && col < n
+                        && ti >= 0
+                        && ti < time as i32
+                        && fi >= 0
+                        && fi < freq as i32
+                    {
+                        v = x[(ci * time + ti as usize) * freq + fi as usize];
                     }
                     sb[at] = v;
                 }
@@ -247,10 +312,8 @@ fn grid(x: &CubeTensor, n: usize) -> cubecl::CubeCount {
 }
 
 impl ConvOps for CubeBackend {
-    fn conv_input(x: CubeTensor) -> CubeTensor {
-        into_contiguous(x)
-    }
-    fn columns(
+    fn implicit_conv(
+        w: CubeTensor,
         x: CubeTensor,
         time: usize,
         freq: usize,
@@ -262,34 +325,38 @@ impl ConvOps for CubeBackend {
         st: usize,
         sf: usize,
         fo: usize,
-        first: usize,
-        count: usize,
+        positions: usize,
     ) -> CubeTensor {
+        let w = into_contiguous(w);
         let x = into_contiguous(x);
-        let k = x.meta.shape()[0] * kt * kf;
-        let y = empty(&x, [k, count]);
-        kernels::columns::launch(
-            &x.client,
-            grid(&x, k * count),
+        let (m, k) = (w.meta.shape()[0], w.meta.shape()[1]);
+        let out = empty(&x, [m, positions]);
+        kernels::implicit_conv::launch(
+            &out.client,
+            cubecl::CubeCount::Static(positions.div_ceil(64) as u32, m.div_ceil(32) as u32, 1),
             CubeDim::new_1d(256),
-            x.clone().into_tensor_arg(),
-            y.clone().into_tensor_arg(),
-            time as u32,
-            freq as u32,
-            kt as u32,
-            kf as u32,
-            dilation as u32,
-            pt as u32,
-            pf as u32,
-            st as u32,
-            sf as u32,
-            fo as u32,
-            first as u32,
-            count as u32,
+            w.into_tensor_arg(),
+            x.into_tensor_arg(),
+            out.clone().into_tensor_arg(),
+            m,
+            positions,
+            k,
+            time,
+            freq,
+            kt,
+            kf,
+            dilation,
+            pt,
+            pf,
+            st,
+            sf,
+            fo,
         );
-        y
+        out
     }
-
+    fn conv_input(x: CubeTensor) -> CubeTensor {
+        into_contiguous(x)
+    }
     fn strict_mm(a: CubeTensor, b: CubeTensor) -> CubeTensor {
         let a = into_contiguous(a);
         let b = into_contiguous(b);
@@ -423,8 +490,7 @@ impl Conv {
     }
 
     fn forward(&self, x: Tensor<2>, time: usize, freq: usize) -> (Tensor<2>, usize, usize) {
-        // Concatenation may return pitched rows at odd STFT widths. Pack once
-        // here, not once per tile inside `columns` (up to 55 full input copies).
+        // Concatenation may return pitched rows at odd STFT widths.
         let x = Tensor::from_dispatch(<Dispatch as ConvOps>::conv_input(x.into_dispatch()));
         let to = (time + 2 * self.pad.0 - self.dilation * (self.kt - 1) - 1) / self.stride.0 + 1;
         let fo = (freq + 2 * self.pad.1 - self.kf) / self.stride.1 + 1;
@@ -436,31 +502,22 @@ impl Conv {
                 fo,
             );
         }
-        let mut tiles = Vec::new();
-        for first in (0..positions).step_by(16384) {
-            let count = (positions - first).min(16384);
-            let cols = Tensor::from_dispatch(<Dispatch as ConvOps>::columns(
-                x.clone().into_dispatch(),
-                time,
-                freq,
-                self.kt,
-                self.kf,
-                self.dilation,
-                self.pad.0,
-                self.pad.1,
-                self.stride.0,
-                self.stride.1,
-                fo,
-                first,
-                count,
-            ));
-            tiles.push(mm(self.w.clone(), cols));
-        }
-        (
-            Tensor::cat(tiles, 1) + self.b.clone().unsqueeze_dim::<2>(1),
-            to,
+        let y = Tensor::from_dispatch(<Dispatch as ConvOps>::implicit_conv(
+            self.w.clone().into_dispatch(),
+            x.into_dispatch(),
+            time,
+            freq,
+            self.kt,
+            self.kf,
+            self.dilation,
+            self.pad.0,
+            self.pad.1,
+            self.stride.0,
+            self.stride.1,
             fo,
-        )
+            positions,
+        ));
+        (y + self.b.clone().unsqueeze_dim::<2>(1), to, fo)
     }
 }
 
@@ -715,6 +772,78 @@ impl Convolutions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cuda_implicit_conv_padding_stride_dilation() {
+        if std::env::var("REUSE_GPU").as_deref() != Ok("cuda") {
+            return;
+        }
+        let device = crate::GpuDevice::Cuda(0).device().unwrap();
+        let (cin, cout, time, freq, kt, kf) = (32usize, 4usize, 31usize, 35usize, 3usize, 3usize);
+        let k = cin * kt * kf;
+        let x: Vec<f32> = (0..cin * time * freq)
+            .map(|i| ((i * 17 % 127) as f32 - 63.0) / 127.0)
+            .collect();
+        let w: Vec<f32> = (0..cout * k)
+            .map(|i| ((i * 7 % 41) as f32 - 20.0) / 128.0)
+            .collect();
+        for (dilation, pt, pf, st, sf) in [(1, 1, 1, 1, 1), (2, 2, 1, 2, 2)] {
+            let to = (time + 2 * pt - dilation * (kt - 1) - 1) / st + 1;
+            let fo = (freq + 2 * pf - kf) / sf + 1;
+            let n = to * fo;
+            let mut cols = vec![0.0; k * n];
+            for ci in 0..cin {
+                for a in 0..kt {
+                    for b in 0..kf {
+                        for pos in 0..n {
+                            let ti = (pos / fo * st + a * dilation) as isize - pt as isize;
+                            let fi = (pos % fo * sf + b) as isize - pf as isize;
+                            if ti >= 0 && ti < time as isize && fi >= 0 && fi < freq as isize {
+                                cols[((ci * kt + a) * kf + b) * n + pos] =
+                                    x[(ci * time + ti as usize) * freq + fi as usize];
+                            }
+                        }
+                    }
+                }
+            }
+            let mut expected = vec![0.0; cout * n];
+            crate::ops::gemm(
+                false,
+                false,
+                cout,
+                n,
+                k,
+                &w,
+                k,
+                &cols,
+                n,
+                0.0,
+                &mut expected,
+                n,
+            );
+            let actual = Tensor::<2>::from_dispatch(<Dispatch as ConvOps>::implicit_conv(
+                Tensor::<2>::from_data(TensorData::new(w.clone(), [cout, k]), &device)
+                    .into_dispatch(),
+                Tensor::<2>::from_data(TensorData::new(x.clone(), [cin, time * freq]), &device)
+                    .into_dispatch(),
+                time,
+                freq,
+                kt,
+                kf,
+                dilation,
+                pt,
+                pf,
+                st,
+                sf,
+                fo,
+                n,
+            ))
+            .into_data()
+            .try_into_vec::<f32>()
+            .unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn cuda_fp32_matmul_and_fp64_norm() {
