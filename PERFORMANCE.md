@@ -7,3 +7,6 @@ CPU encoder/decoder account for 84% of single-window time.
 
 Build: ../build-cuda.ps1 (release, --locked, --features cuda).
 Fixtures and immutable baseline binaries/outputs: ../work/perf-loop (not tracked).
+Rust harness: `cargo build --release --features cuda --example perf`, then
+`perf record|check <model> <reference-dir> <input.wav>...`. Uses 5 s / 50%
+chunking, one warmup, reports chunked RTF and fails any sample beyond 1 LSB.
