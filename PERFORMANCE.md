@@ -26,3 +26,8 @@ small encoder differences affect the original Mamba's TF32 rounding.
 Long fixture: `perf fixture ../work/perf-loop/corpus-60s.wav 60 <five previews>`.
 It concatenates/repeats original samples in Rust, with no resampling. Preserve
 its reference using the immutable baseline-perf.exe in record mode.
+Original 60 s reference: 159.093 s, RTF 2.652.
+Accepted: shared-memory FP32 GEMM with CPU K=256 rounding in one launch.
+5x10 s: 27.978 -> 27.305 s; 60 s: 41.835 s (RTF 0.697), all samples identical.
+Removed the direct cubek dependency. REUSE_PROFILE=1 prints synchronized CUDA
+encoder/Mamba/decoder times; leave unset for benchmarks. Log: gpu-blocked-mm.log.

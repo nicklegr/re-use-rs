@@ -76,6 +76,88 @@ mod kernels {
         y[at] = v;
     }
 
+    /// 32x64 output tile, 256 threads, eight accumulators per thread.
+    /// Preserve sequential FMA within each CPU-sized K=256 block.
+    #[cube(launch)]
+    pub fn blocked_mm(
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        out: &mut Tensor<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) {
+        let m = m as usize;
+        let n = n as usize;
+        let k = k as usize;
+        let tid = UNIT_POS as usize;
+        let tx = tid % 64usize;
+        let ty = tid / 64usize;
+        let row0 = CUBE_POS_Y as usize * 32usize;
+        let col0 = CUBE_POS_X as usize * 64usize;
+        let mut sa = Shared::<[f32]>::new_slice(1024usize);
+        let mut sb = Shared::<[f32]>::new_slice(2048usize);
+        let mut total = Array::<f32>::new(8usize);
+        #[unroll]
+        for r in 0..8usize {
+            total[r] = 0.0f32;
+        }
+        for block in 0..(k + 255usize) / 256usize {
+            let mut partial = Array::<f32>::new(8usize);
+            #[unroll]
+            for r in 0..8usize {
+                partial[r] = 0.0f32;
+            }
+            for tile in 0..8usize {
+                let k0 = block * 256usize + tile * 32usize;
+                #[unroll]
+                for i in 0..4usize {
+                    let at = tid + i * 256usize;
+                    let row = row0 + at / 32usize;
+                    let kk = k0 + at % 32usize;
+                    let mut v = 0.0f32;
+                    if row < m && kk < k {
+                        v = a[row * k + kk];
+                    }
+                    sa[at] = v;
+                }
+                #[unroll]
+                for i in 0..8usize {
+                    let at = tid + i * 256usize;
+                    let kk = k0 + at / 64usize;
+                    let col = col0 + at % 64usize;
+                    let mut v = 0.0f32;
+                    if kk < k && col < n {
+                        v = b[kk * n + col];
+                    }
+                    sb[at] = v;
+                }
+                sync_cube();
+                #[unroll]
+                for kk in 0..32usize {
+                    let bv = sb[kk * 64usize + tx];
+                    #[unroll]
+                    for r in 0..8usize {
+                        partial[r] = fma(sa[(ty + r * 4usize) * 32usize + kk], bv, partial[r]);
+                    }
+                }
+                sync_cube();
+            }
+            #[unroll]
+            for r in 0..8usize {
+                total[r] += partial[r];
+            }
+        }
+        #[unroll]
+        for r in 0..8usize {
+            let row = row0 + ty + r * 4usize;
+            let col = col0 + tx;
+            if row < m && col < n {
+                out[row * n + col] = total[r];
+            }
+        }
+    }
+
     // Two FP64 moments per 1024-value piece; never materialize an FP64 plane.
     #[cube(launch)]
     pub fn moments(x: &Tensor<f32>, partial: &mut Tensor<f64>, plane: u32, pieces: u32) {
@@ -204,30 +286,21 @@ impl ConvOps for CubeBackend {
     }
 
     fn strict_mm(a: CubeTensor, b: CubeTensor) -> CubeTensor {
-        use cubek::{
-            matmul::{
-                definition::{MatmulElems, MatmulGlobalElems},
-                multi_level::Strategy,
-            },
-            std::InputBinding,
-        };
-        let out = empty(&a, [a.meta.shape()[0], b.meta.shape()[1]]);
-        let dtype = burn::backend::cubecl::dtype_to_storage_type(a.dtype);
-        let mut dtypes = MatmulElems::from_globals(&MatmulGlobalElems {
-            lhs: dtype,
-            rhs: dtype,
-            out: dtype,
-        });
-        // SimpleUnit keeps FP32 products/accumulation. Auto can silently choose TF32.
-        cubek::matmul::launch::launch_ref(
-            &Strategy::SimpleUnit(Default::default()).into(),
+        let a = into_contiguous(a);
+        let b = into_contiguous(b);
+        let (m, k, n) = (a.meta.shape()[0], a.meta.shape()[1], b.meta.shape()[1]);
+        let out = empty(&a, [m, n]);
+        kernels::blocked_mm::launch(
             &out.client,
-            InputBinding::new(a.binding(), dtype),
-            InputBinding::new(b.binding(), dtype),
-            out.clone().binding(),
-            &mut dtypes,
-        )
-        .expect("FP32 CUDA GEMM");
+            cubecl::CubeCount::Static(n.div_ceil(64) as u32, m.div_ceil(32) as u32, 1),
+            CubeDim::new_1d(256),
+            a.into_tensor_arg(),
+            b.into_tensor_arg(),
+            out.clone().into_tensor_arg(),
+            m as u32,
+            n as u32,
+            k as u32,
+        );
         out
     }
 
@@ -302,23 +375,10 @@ fn tensor<const D: usize>(w: &Weights, name: &str, device: &Device) -> Result<Te
 }
 
 fn mm(a: Tensor<2>, b: Tensor<2>) -> Tensor<2> {
-    let [m, k] = a.dims();
-    let n = b.dims()[1];
-    let mut out = None;
-    // Match matrixmultiply's 256-wide K blocks, including the intervening
-    // FP32 rounding when each block is added to the accumulated output.
-    for first in (0..k).step_by(256) {
-        let end = (first + 256).min(k);
-        let block = Tensor::from_dispatch(<Dispatch as ConvOps>::strict_mm(
-            a.clone().slice([0..m, first..end]).into_dispatch(),
-            b.clone().slice([first..end, 0..n]).into_dispatch(),
-        ));
-        out = Some(match out {
-            Some(sum) => sum + block,
-            None => block,
-        });
-    }
-    out.unwrap()
+    Tensor::from_dispatch(<Dispatch as ConvOps>::strict_mm(
+        a.into_dispatch(),
+        b.into_dispatch(),
+    ))
 }
 
 struct Conv {
@@ -601,6 +661,15 @@ impl Convolutions {
         freq: usize,
         mamba: &gpu::Model,
     ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>, usize) {
+        let profile = std::env::var_os("REUSE_PROFILE").is_some();
+        let sync = || {
+            if profile {
+                <Dispatch as Backend>::sync(self.device.as_dispatch())
+                    .expect("CUDA synchronization");
+            }
+        };
+        sync();
+        let start = std::time::Instant::now();
         let x = Tensor::from_data(TensorData::new(x, [2, time * freq]), &self.device);
         let (x, time, freq) = self.input.forward(x, time, freq);
         let x = self.dense.forward(x, time, freq);
@@ -610,13 +679,27 @@ impl Convolutions {
             .reshape([channels, time, freq])
             .permute([2, 1, 0])
             .reshape([time * freq, channels]);
+        sync();
+        let encoder = start.elapsed();
+        let start = std::time::Instant::now();
         let rows = mamba.mamba_tensor(rows, time, freq, channels);
         let x = rows
             .reshape([freq, time, channels])
             .permute([2, 1, 0])
             .reshape([channels, time * freq]);
+        sync();
+        let middle = start.elapsed();
+        let start = std::time::Instant::now();
         let mag = self.mag.forward(x.clone(), time, freq);
         let pha = self.pha.forward(x, time, freq);
+        if profile {
+            eprintln!(
+                "CUDA_STAGES encoder={:.6} mamba={:.6} decoder={:.6}",
+                encoder.as_secs_f64(),
+                middle.as_secs_f64(),
+                start.elapsed().as_secs_f64()
+            );
+        }
         (mag, pha, 2 * freq)
     }
 }

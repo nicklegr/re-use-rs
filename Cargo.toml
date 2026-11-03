@@ -38,12 +38,6 @@ default-features = false
 features = ["std"]
 optional = true
 
-[dependencies.cubek]
-version = "0.3.1"
-default-features = false
-features = ["std", "stdlib", "matmul", "matmul-multi-level"]
-optional = true
-
 [features]
 # The offline model on a GPU with Burn. Enable one or more backends:
 gpu = ["dep:burn", "dep:burn-cubecl", "dep:cubecl"]
@@ -51,7 +45,7 @@ gpu = ["dep:burn", "dep:burn-cubecl", "dep:cubecl"]
 wgpu = ["gpu", "burn/wgpu"]
 metal = ["gpu", "burn/metal"]
 vulkan = ["gpu", "burn/vulkan"]
-cuda = ["gpu", "burn/cuda", "dep:cubek"]
+cuda = ["gpu", "burn/cuda"]
 rocm = ["gpu", "burn/rocm"]
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
