@@ -1,118 +1,78 @@
-# Performance loop — RTF 0.25 target in progress
+# Performance state — RTF 0.25 work paused
 
-Current target: 300 s offline.exe process <= 75 s, including startup/I/O.
-Start from 54de173 (RTF 0.498059). Same original-reference precision gate.
-Prior RTF 0.50 results below are the starting baseline, not the new target.
+Paused at the user's request after the current experiment. Target remains
+RTF <= 0.25; it has NOT been reached. Rules: AGENTS.md.
 
-RTF 0.25 loop: Mamba dimensions/reverse/taps/rank specialized at compilation;
-dt weights cached per thread. Interleaved old/new/new/old 10 s fixture:
-3.8944 / 3.7997 / 3.8017 / 3.8896 s (about 2.3% faster).
-All 130 s of reference fixtures bit-identical; 60 s = 29.049 s under this load.
-Logs: mamba-specialized-ab-*.log, mamba-specialized-validation.log.
-Nsight Compute counters unavailable (ERR_NVGPUCTRPERM); driver policy unchanged.
-Accepted: scan block 32 after balanced 256/128/64/32/32/64/128/256 trials.
-10 s times: 256=3.629/3.632, 128=3.519/3.526, 64=3.508/3.514,
-32=3.384/3.375 s; all bit-identical. Full 130 s gate passes; 60 s=25.802 s
-(RTF 0.4300). Log: mamba-scan32-validation.log. Temporary tuning env removed.
-Accepted: CUDA forward/backward branches use two persistent scoped streams;
-their projections overlap, with the original final addition order unchanged.
-60 s=25.275 s (RTF 0.4212); all 130 s reference fixtures bit-identical.
-Log: mamba-streams-validation.log. Other GPU backends retain sequential branches.
-Accepted: fuse CUDA projection sums, layer norm, outer residual and transpose,
-preserving the original four-lane reduction and separately rounded products.
-Mamba stage 0.634 -> 0.596 s; 60 s=24.367 s (RTF 0.4061).
-All 130 s reference fixtures bit-identical; strict CUDA clippy passes.
-Log: mamba-finish-validation.log.
-Rejected Mamba probes: unchecked indexing and padded projection width offered
-no speedup; separate delta/gate precomputation slowed Mamba to 0.713/0.759 s.
-Accepted: implicit CUDA convolution loads source values into shared GEMM tiles
-without materializing im2col or concatenating output tiles. Same K=256 FMA order.
-Encoder 0.281 -> 0.173 s, decoder 0.112 -> 0.080 s; 60 s=21.172 s
-(RTF 0.3529). Full 130 s gate bit-identical; strict CUDA clippy and 8 tests pass,
-including CPU-GEMM comparison of implicit convolution padding/stride/dilation.
-Log: implicit-conv-validation.log. A two-window pipeline before this change
-reached VRAM capacity and slowed 10 s to 17.94 s; discarded.
-Accepted: Mamba CMMA uses tilewise loading and twice the row partitions,
-with the original TF32 instruction and K traversal. CUDA-only; unsupported
-configurations and other runtimes use Burn's original matmul strategy.
-Mamba 0.595 -> 0.549 s; 60 s=20.706 s (RTF 0.3451), full 130 s gate
-bit-identical. Log: matmul-tiles-validation.log. Alternative raw MMA exceeded
-2 LSB and was rejected. Double-buffering and larger row tiles were slower.
-Two-window retry after implicit convolution: 60 s=21.299 s, no benefit;
-discarded (window-pipeline-implicit-probe.log).
-Accepted: cache scan A coefficients in per-thread columns of CUDA shared memory
-to free registers, with identical operations. Balanced register/shared/shared-dt/
-register probes: Mamba 0.548/0.539/0.539/0.549 s. Keep dt in registers.
-Full 130 s gate bit-identical; 60 s=19.828 s (RTF 0.3305); strict clippy passes.
-Log: scan-shared-validation.log. Larger convolution tiles offered little gain
-and excessive kernel compilation time (up to 42 s); not adopted.
-Accepted: parallel independent STFT/IFFT frames and CPU spectral transforms.
-Keep both IFFT and chunk overlap-add in original order. 60 s=18.796 s
-(RTF 0.3133); all 130 s reference fixtures bit-identical. Strict CUDA clippy
-and CPU unit tests pass. Log: cpu-spectral-validation.log.
-Accepted: double Mamba CMMA column partitions as well as row partitions.
-Mamba 0.538 -> 0.524 s in balanced 1/2/4/2/1 column-width probes; 4 was slower.
-60 s=18.462 s (RTF 0.3077); all 130 s reference fixtures bit-identical;
-strict CUDA clippy and 9 GPU-enabled tests pass. Log: matmul-wide-validation.log.
-Accepted: fuse convolution scale/shift/PReLU with explicit FMA-to-zero product
-rounding. Encoder 0.172 -> 0.166 s, decoder 0.080 -> 0.076 s.
-Full 130 s gate bit-identical; 60 s=18.215 s (RTF 0.3036); strict clippy passes.
-Log: conv-scale-fused-validation.log. Narrower GEMM tiles and unchecked implicit
-convolution showed no material benefit; discarded.
-Accepted: interleave FP64 moment pieces for coalesced FP32 input reads.
-Encoder 0.166 -> 0.162 s, decoder 0.076 -> 0.074 s. Full 130 s gate
-bit-identical; 60 s=18.133 s (RTF 0.3022); strict CUDA clippy passes.
-Log: moments-coalesced-validation.log.
+## Final measurements
 
-Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
-Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,
-5 s chunks, 50% overlap; batch worker stopped; existing kernel cache.
+- Normal offline.exe on 300 s: inference 101.2 s; complete child process
+  **106.441088 s, RTF 0.354804**, including load, warmup and WAV I/O.
+  Valid 13,230,000-sample finite output. The Rust 0.25 gate correctly fails.
+  Log: ../work/perf-loop/production25-paused-300s.log.
+- Previous RTF 0.50 endpoint (54de173): 300 s process 149.417689 s,
+  RTF 0.498059. The final process is about 28.8% faster.
+- Latest 60 s chunked accuracy run: 18.133295 s, RTF 0.302222.
+  Do not extrapolate this short run to the 300 s process result.
+- Original CUDA reference is commit 88638f3. Five speech/noise previews,
+  silence/quiet/impulse/DC and the 60 s corpus total 130 s / 5,733,000 samples:
+  max float difference 0, max PCM16 difference 0, changed bits 0.
+  Log: moments-coalesced-validation.log. The 300 s run measures throughput
+  and validity; its full waveform was not separately compared to an original
+  300 s reference.
+- Final fmt check, strict release clippy with/without CUDA, 6 CPU tests and
+  9 CUDA-enabled tests pass. Failed experiments removed; accepted code committed.
 
-## Final verification
+Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. 44.1 kHz, original
+weights, 5 s windows / 50% overlap throughout. User's batch worker remains stopped.
 
-- Normal offline.exe, 300 s corpus (119 windows): inference 147.0 s;
-  complete process including load, warmup and WAV I/O **149.417689 s**, RTF
-  **0.498059**. Valid 13,230,000-sample finite output. Log: production-300s.log.
-- 60 s corpus, three repeats: 28.355048 / 28.389864 / 28.366988 s
-  (RTF 0.472584 / 0.473164 / 0.472783).
-- Five speech/noise previews, silence, quiet, impulses, DC, and three 60 s runs:
-  11,025,000 sample comparisons; max float difference 0, max PCM16 difference 0,
-  bit changes 0. Log: final-validation.log. 300 s run checks throughput/validity;
-  its full waveform was not separately compared with a 300 s original reference.
-- cargo fmt --check; strict clippy --all-targets --release with and without
-  cuda; CPU tests and 7 CUDA-enabled unit tests pass.
+## Accepted changes since 54de173 (one commit each)
 
-## Accepted improvements (separate commits)
+- 1b71dc7: specialize Mamba shapes/direction/taps/rank; cache dt weights.
+- a54b961: scan blocks of 32 threads.
+- 3a2fc71: forward/backward Mamba branches on persistent CUDA streams.
+- a7903e9: fuse projection sums, layer norm, outer residual and transpose.
+- 04c8513: implicit convolution, without im2col/output-tile concatenation.
+- 3b25c55: Mamba CMMA tilewise reads and wider row tiles.
+- 30ce8cb: scan A coefficients in shared memory to free registers.
+- 9071b4a: parallel FFT/IFFT frames and independent CPU spectral operations;
+  retain original overlap-add order.
+- 7fb8183: wider CMMA column tiles.
+- b967c55: fuse convolution scale/shift/PReLU, rounding product with FMA-to-zero.
+- e566135: coalesced FP32 reads for FP64 normalization moments.
 
-| Change | Five 10 s previews, total processing |
-|---|---:|
-| Original | 102.472 s |
-| Cache-bounded CPU im2col, scratch reuse, contiguous row copies | 93.531 s |
-| CUDA encoder/decoders and GPU-resident activations | 27.978 s |
-| Shared-memory FP32 GEMM with exact K=256 rounding | 27.305 s |
-| Pack pitched input once per convolution, not per tile | 18.520 s |
+Numerics: convolution GEMM retains sequential FP32 FMA within K=256 partial
+sums. Keep FP64 moments and separately rounded products. Mamba retains the
+original TF32 CMMA instruction/K order, four-lane norm reduction and sequential
+scan. Every accepted change passed the original-reference fixture gate.
 
-Original 60 s reference: 159.093 s. Earlier production 300 s: about 833 s.
-Nsight identified repeated pitched-to-contiguous copies as 33.7% of GPU time.
-Packing once removes up to 55 copies of a large activation per convolution.
-All accepted variants passed original-reference comparisons.
+## Important rejected probes
 
-Numerics: preserve matrixmultiply's 256-wide K blocks and sequential FP32 FMA;
-use FP64 normalization moments and separate FP32 multiply/add rounding.
-Unblocked GEMM/fused normalization changed up to 50 PCM16 LSB through later
-Mamba TF32 rounding, so was rejected. Bounds-check removal alone was slower
-and was discarded. Keep the original Mamba arithmetic.
+- Raw MMA changed up to 2.07 PCM16 LSB: fails precision; do not enable it.
+- Projection padding, separate delta/gate preparation, unchecked kernels:
+  no gain or slower. Larger convolution tiles add excessive JIT time.
+- Two-window processing: VRAM pressure and no throughput improvement on retry.
+- Final input-projection/causal-convolution fusion: bit-identical on two 10 s
+  previews but Mamba 0.524 -> 0.554 s (64 rows, K=8), or 0.630 s (32 rows,
+  K=32). Discarded. Work files: fused-input-probe.patch, gpu-input32-k32.rs,
+  gpu-input-64-k8.rs; logs fused-input*-probe.log.
+- Nsight Compute counters unavailable (ERR_NVGPUCTRPERM); driver policy untouched.
+  Nsight Systems works; latest trace nsys-implicit.nsys-rep/.sqlite.
 
-## Reproduce
+## Reproduce / artifacts
 
-Build: ../build-cuda.ps1. Also build --release --features cuda --example perf.
-All fixture/baseline binaries, WAVs, logs: ../work/perf-loop (not tracked).
+All binaries, immutable original references, WAV fixtures and logs are outside
+Git in ../work/perf-loop. Never overwrite reference WAVs. Latest full precision
+log: moments-coalesced-validation.log. Normal output: production25-paused-300s.wav.
 
-- `perf record|check <model> <reference-dir> <input.wav>...`: chunked RTF and
-  per-sample float/PCM16/bit comparison; never overwrite immutable references.
-- `perf fixture <out.wav> <seconds> <input.wav>...`: concatenate/repeat without
-  resampling. corpus-60s uses the five previews; corpus-300s repeats corpus-60s.
-- `perf signals <dir>`: deterministic 44.1 kHz edge fixtures.
-- `perf exec <offline.exe> <model> <input.wav> <out.wav>`: full process wall time,
-  output validity, and a failing exit code if RTF > 0.25.
-- REUSE_PROFILE=1: synchronized encoder/Mamba/decoder times; unset for timing.
+Build in a developer PowerShell: `. ../work/perf-loop/env.ps1`, then
+`cargo +stable build --offline --locked --release --features cuda --example perf --example offline`.
+The local work toolchain is Rust 1.99.1; do not use the old global toolchain.
+
+- `perf check <model> <reference-dir> <input.wav>...`: fixed 5 s / 50% overlap,
+  finite/length check and every-sample float/PCM16/bit comparison.
+- `perf exec <offline.exe> <model> <input.wav> <new-output.wav>`: complete process
+  time and validity, fails when RTF > 0.25; never overwrites output.
+- `perf fixture <new-out.wav> <seconds> <input.wav>...`: concatenate/repeat,
+  no resampling. corpus-300s repeats corpus-60s five times.
+- REUSE_PROFILE=1 synchronizes encoder/Mamba/decoder boundaries; unset for timing.
+- All temporary tuning switches and fused-input code have been removed.
