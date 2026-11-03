@@ -101,10 +101,10 @@ mod kernel {
         bias: &Tensor<F>,
         xc: &mut Tensor<F>,
         rows: u32,
-        len: u32,
-        d_inner: u32,
-        taps: u32,
-        reverse: u32,
+        #[comptime] len: u32,
+        #[comptime] d_inner: u32,
+        #[comptime] taps: u32,
+        #[comptime] reverse: u32,
         #[define(F)] _dtype: ElemType,
     ) {
         let di = d_inner as usize;
@@ -117,6 +117,7 @@ mod kernel {
         let len = len as usize;
         let l = row % len;
         let mut acc = bias[c];
+        #[unroll]
         for k in 0..taps {
             // Tap k reads `taps - 1 - k` steps back; steps before the sequence start are zero.
             let back = taps - 1 - k;
@@ -143,10 +144,10 @@ mod kernel {
         d: &Tensor<F>,
         y: &mut Tensor<F>,
         batch: u32,
-        len: u32,
-        d_inner: u32,
-        dt_rank: u32,
-        reverse: u32,
+        #[comptime] len: u32,
+        #[comptime] d_inner: u32,
+        #[comptime] dt_rank: u32,
+        #[comptime] reverse: u32,
         #[define(F)] _dtype: ElemType,
     ) {
         let di = d_inner as usize;
@@ -159,6 +160,11 @@ mod kernel {
         let nd = rank + 32;
         let mut s = Array::new(16usize);
         let mut ac = Array::new(16usize);
+        let mut dt = Array::new(rank);
+        #[unroll]
+        for k in 0..rank {
+            dt[k] = dt_w[c * rank + k];
+        }
         #[unroll]
         for n in 0..16usize {
             s[n] = F::new(0.0f32);
@@ -172,8 +178,9 @@ mod kernel {
             }
             let row = seq * len + l;
             let mut raw = bias;
+            #[unroll]
             for k in 0..rank {
-                raw += dbl[row * nd + k] * dt_w[c * rank + k];
+                raw += dbl[row * nd + k] * dt[k];
             }
             // torch softplus, threshold 20.
             let mut delta = raw;

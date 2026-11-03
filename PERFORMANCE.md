@@ -4,6 +4,13 @@ Current target: 300 s offline.exe process <= 75 s, including startup/I/O.
 Start from 54de173 (RTF 0.498059). Same original-reference precision gate.
 Prior RTF 0.50 results below are the starting baseline, not the new target.
 
+RTF 0.25 loop: Mamba dimensions/reverse/taps/rank specialized at compilation;
+dt weights cached per thread. Interleaved old/new/new/old 10 s fixture:
+3.8944 / 3.7997 / 3.8017 / 3.8896 s (about 2.3% faster).
+All 130 s of reference fixtures bit-identical; 60 s = 29.049 s under this load.
+Logs: mamba-specialized-ab-*.log, mamba-specialized-validation.log.
+Nsight Compute counters unavailable (ERR_NVGPUCTRPERM); driver policy unchanged.
+
 Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
 Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,
 5 s chunks, 50% overlap; batch worker stopped; existing kernel cache.
