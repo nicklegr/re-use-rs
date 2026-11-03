@@ -387,10 +387,11 @@ struct BiMamba {
     output_bias: Tensor<1>,
     norm_w: Tensor<1>,
     norm_b: Tensor<1>,
+    streams: Option<[cubecl_environment::stream::StreamId; 2]>,
 }
 
 impl BiMamba {
-    fn load(w: &Weights, prefix: &str, device: &Device) -> Result<Self> {
+    fn load(w: &Weights, prefix: &str, device: &Device, parallel: bool) -> Result<Self> {
         let proj = linear(w, &format!("{prefix}.output_proj.weight"), device)?;
         let [inp, out] = proj.dims();
         Ok(Self {
@@ -401,10 +402,30 @@ impl BiMamba {
             output_bias: tensor(w, &format!("{prefix}.output_proj.bias"), device)?,
             norm_w: tensor(w, &format!("{prefix}.norm.weight"), device)?,
             norm_b: tensor(w, &format!("{prefix}.norm.bias"), device)?,
+            streams: if parallel {
+                use cubecl_environment::stream::StreamId;
+                static STREAMS: std::sync::OnceLock<[StreamId; 2]> = std::sync::OnceLock::new();
+                Some(*STREAMS.get_or_init(|| [StreamId::allocate(), StreamId::allocate()]))
+            } else {
+                None
+            },
         })
     }
 
     fn forward(&self, x: Tensor<2>, batch: usize) -> Tensor<2> {
+        if let Some([fw_stream, bw_stream]) = self.streams {
+            let fw = fw_stream.executes(|| {
+                (self.forward.forward(x.clone(), batch, false) + x.clone())
+                    .matmul(self.proj_fw.clone())
+            });
+            let bw = bw_stream.executes(|| {
+                (self.backward.forward(x.clone(), batch, true) + x).matmul(self.proj_bw.clone())
+            });
+            // CubeCL tracks cross-stream dependencies of these tensors. Keep
+            // the projection sum and normalization in their original order.
+            let out = fw + bw + self.output_bias.clone().unsqueeze::<2>();
+            return layer_norm(out, &self.norm_w, &self.norm_b);
+        }
         let fw = self.forward.forward(x.clone(), batch, false) + x.clone();
         let bw = self.backward.forward(x.clone(), batch, true) + x;
         let out = fw.matmul(self.proj_fw.clone())
@@ -428,12 +449,13 @@ pub(crate) struct Model {
 
 impl Model {
     pub(crate) fn load(w: &Weights, blocks: usize, device: GpuDevice) -> Result<Self> {
+        let parallel = matches!(device, GpuDevice::Cuda(_));
         let device = device.device()?;
         let blocks = (0..blocks)
             .map(|i| {
                 Ok(Block {
-                    time: BiMamba::load(w, &format!("TSMamba.{i}.time_mamba"), &device)?,
-                    freq: BiMamba::load(w, &format!("TSMamba.{i}.freq_mamba"), &device)?,
+                    time: BiMamba::load(w, &format!("TSMamba.{i}.time_mamba"), &device, parallel)?,
+                    freq: BiMamba::load(w, &format!("TSMamba.{i}.freq_mamba"), &device, parallel)?,
                 })
             })
             .collect::<Result<_>>()?;

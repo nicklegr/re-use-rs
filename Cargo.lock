@@ -4998,6 +4998,7 @@ dependencies = [
  "burn",
  "burn-cubecl",
  "cubecl",
+ "cubecl-environment",
  "eyre",
  "hound",
  "matrixmultiply",
