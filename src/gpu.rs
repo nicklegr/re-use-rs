@@ -7,7 +7,9 @@
 
 use crate::weights::Weights;
 use burn::backend::{backend_extension, tensor::FloatTensor, Backend, Dispatch};
-use burn::tensor::{Device, DeviceKind, Tensor, TensorData};
+#[cfg(any(feature = "wgpu", feature = "metal", feature = "vulkan"))]
+use burn::tensor::DeviceKind;
+use burn::tensor::{Device, Tensor, TensorData};
 use burn_cubecl::{
     kernel::into_contiguous, ops::numeric::empty_device_dtype, tensor::CubeTensor, CubeBackend,
 };
@@ -32,7 +34,7 @@ pub enum GpuDevice {
 }
 
 impl GpuDevice {
-    fn device(self) -> Result<Device> {
+    pub(crate) fn device(self) -> Result<Device> {
         let missing =
             |feature: &str| eyre::eyre!("reuse-rs was built without the `{feature}` feature");
         match self {
@@ -407,8 +409,8 @@ struct Block {
     freq: BiMamba,
 }
 
-/// The TF-Mamba blocks on a GPU. The convolutional encoder and decoders stay on the CPU, where
-/// they run faster than Burn's conv2d at these sizes.
+/// The TF-Mamba blocks on a GPU. CUDA also uses the FP32 convolutional path;
+/// other backends keep the convolutional encoder and decoders on the CPU.
 pub(crate) struct Model {
     blocks: Vec<Block>,
     device: Device,
@@ -437,10 +439,24 @@ impl Model {
         channels: usize,
     ) -> Vec<f32> {
         let positions = time * freq;
-        let mut x: Tensor<2> = Tensor::from_data(
+        let x: Tensor<2> = Tensor::from_data(
             TensorData::new(rows.to_vec(), [positions, channels]),
             &self.device,
         );
+        self.mamba_tensor(x, time, freq, channels)
+            .into_data()
+            .try_into_vec::<f32>()
+            .expect("GPU output is f32")
+    }
+
+    pub(crate) fn mamba_tensor(
+        &self,
+        mut x: Tensor<2>,
+        time: usize,
+        freq: usize,
+        channels: usize,
+    ) -> Tensor<2> {
+        let positions = time * freq;
         // [a][b][c] -> [b][a][c]
         let swap = |t: Tensor<2>, a: usize, b: usize| {
             t.reshape([a, b, channels])
@@ -453,8 +469,6 @@ impl Model {
             x = x.clone() + block.freq.forward(x, time);
             x = swap(x, time, freq);
         }
-        x.into_data()
-            .try_into_vec::<f32>()
-            .expect("GPU output is f32")
+        x
     }
 }

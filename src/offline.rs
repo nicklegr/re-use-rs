@@ -97,7 +97,9 @@ impl Conv {
                                 if self.stride.1 == 1 {
                                     let offset = b as isize - self.pad.1 as isize;
                                     let begin = (-offset).max(0).min(fo as isize) as usize;
-                                    let end = (freq as isize - offset).clamp(begin as isize, fo as isize) as usize;
+                                    let end = (freq as isize - offset)
+                                        .clamp(begin as isize, fo as isize)
+                                        as usize;
                                     dst[..begin].fill(0.0);
                                     dst[end..].fill(0.0);
                                     if end > begin {
@@ -106,8 +108,13 @@ impl Conv {
                                     }
                                 } else {
                                     for (f, v) in dst.iter_mut().enumerate() {
-                                        let fi = (f * self.stride.1 + b) as isize - self.pad.1 as isize;
-                                        *v = if fi >= 0 && (fi as usize) < freq { src[fi as usize] } else { 0.0 };
+                                        let fi =
+                                            (f * self.stride.1 + b) as isize - self.pad.1 as isize;
+                                        *v = if fi >= 0 && (fi as usize) < freq {
+                                            src[fi as usize]
+                                        } else {
+                                            0.0
+                                        };
                                     }
                                 }
                             }
@@ -341,6 +348,8 @@ pub struct Offline {
     pha: Decoder,
     #[cfg(feature = "gpu")]
     gpu: Option<crate::gpu::Model>,
+    #[cfg(feature = "cuda")]
+    cuda_conv: Option<crate::gpu_conv::Convolutions>,
 }
 
 fn make_even(n: usize) -> usize {
@@ -380,17 +389,23 @@ impl Offline {
             pha: Decoder::load(&w, "phase_decoder", &["phase_conv_r", "phase_conv_i"])?,
             #[cfg(feature = "gpu")]
             gpu: None,
+            #[cfg(feature = "cuda")]
+            cuda_conv: None,
         })
     }
 
-    /// Like [`load`](Self::load), with the TF-Mamba blocks on a GPU. The convolutional encoder
-    /// and decoders stay on the CPU, where they run faster.
+    /// Like [`load`](Self::load), with the TF-Mamba blocks on a GPU. CUDA also
+    /// runs FP32 convolutions on the GPU; other backends keep them on the CPU.
     #[cfg(feature = "gpu")]
     pub fn load_gpu(path: impl AsRef<Path>, device: crate::GpuDevice) -> Result<Self> {
         let mut model = Self::load(path.as_ref())?;
         let w = Weights::load(path)?;
         let blocks = std::mem::take(&mut model.blocks).len();
         model.gpu = Some(crate::gpu::Model::load(&w, blocks, device)?);
+        #[cfg(feature = "cuda")]
+        if matches!(device, crate::GpuDevice::Cuda(_)) {
+            model.cuda_conv = Some(crate::gpu_conv::Convolutions::load(&w, device.device()?)?);
+        }
         Ok(model)
     }
 
@@ -433,6 +448,12 @@ impl Offline {
             }
         }
 
+        #[cfg(feature = "cuda")]
+        if let Some(conv) = &self.cuda_conv {
+            let (mag_out, pha_out, width) = conv.forward(x, time, freq, self.gpu.as_ref().unwrap());
+            return crop_output(&mag_out, &pha_out, width, bins, frames);
+        }
+
         let (h, time, freq) = self.encoder_in.forward(&x, time, freq);
         let h = self.encoder_dense.forward(&h, time, freq);
         let (h, time, freq) = self.encoder_out.forward(&h, time, freq);
@@ -449,17 +470,7 @@ impl Offline {
             || self.pha.forward(&h, time, freq),
         );
         let width = 2 * freq;
-        let crop = |p: &[f32]| -> Vec<Vec<f32>> {
-            (0..bins)
-                .map(|f| (0..frames).map(|t| p[t * width + f]).collect())
-                .collect()
-        };
-        let phase: Vec<f32> = pha_out[1]
-            .iter()
-            .zip(&pha_out[0])
-            .map(|(i, r)| i.atan2(*r))
-            .collect();
-        (crop(&mag_out[0]), crop(&phase))
+        crop_output(&mag_out, &pha_out, width, bins, frames)
     }
 
     /// Enhances a whole mono recording at any of [`audio::SAMPLE_RATES`](crate::audio::SAMPLE_RATES).
@@ -536,6 +547,26 @@ impl Offline {
     }
 }
 
+fn crop_output(
+    mag: &[Vec<f32>],
+    pha: &[Vec<f32>],
+    width: usize,
+    bins: usize,
+    frames: usize,
+) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let crop = |p: &[f32]| -> Vec<Vec<f32>> {
+        (0..bins)
+            .map(|f| (0..frames).map(|t| p[t * width + f]).collect())
+            .collect()
+    };
+    let phase: Vec<f32> = pha[1]
+        .iter()
+        .zip(&pha[0])
+        .map(|(i, r)| i.atan2(*r))
+        .collect();
+    (crop(&mag[0]), crop(&phase))
+}
+
 /// `[a][b][c]` -> `[b][a][c]`.
 fn transpose_outer(x: &[f32], a: usize, b: usize, c: usize) -> Vec<f32> {
     let mut out = vec![0f32; x.len()];
@@ -560,10 +591,21 @@ mod tests {
             (3, 3, 1, 1, (1, 0), (1, 1)),
         ] {
             let (time, freq, cout) = (31, 64, 2);
-            let x: Vec<f32> = (0..cin*time*freq).map(|i| ((i*17%127) as f32-63.0)/127.0).collect();
+            let x: Vec<f32> = (0..cin * time * freq)
+                .map(|i| ((i * 17 % 127) as f32 - 63.0) / 127.0)
+                .collect();
             let conv = Conv {
-                weight: (0..cout*cin*kt*kf).map(|i| ((i*7%41) as f32-20.0)/128.0).collect(),
-                bias: vec![0.125, -0.25], cin, cout, kt, kf, dilation, pad, stride,
+                weight: (0..cout * cin * kt * kf)
+                    .map(|i| ((i * 7 % 41) as f32 - 20.0) / 128.0)
+                    .collect(),
+                bias: vec![0.125, -0.25],
+                cin,
+                cout,
+                kt,
+                kf,
+                dilation,
+                pad,
+                stride,
             };
             let (to, fo) = conv.out_size(time, freq);
             let actual = conv.forward(&x, time, freq);
@@ -574,18 +616,28 @@ mod tests {
                         for ci in 0..cin {
                             for a in 0..kt {
                                 for b in 0..kf {
-                                    let ti = (t*stride.0+a*dilation) as isize-pad.0 as isize;
-                                    let fi = (f*stride.1+b) as isize-pad.1 as isize;
-                                    if ti >= 0 && ti < time as isize && fi >= 0 && fi < freq as isize {
-                                        expected += conv.weight[((co*cin+ci)*kt+a)*kf+b] as f64
-                                            * x[(ci*time+ti as usize)*freq+fi as usize] as f64;
+                                    let ti =
+                                        (t * stride.0 + a * dilation) as isize - pad.0 as isize;
+                                    let fi = (f * stride.1 + b) as isize - pad.1 as isize;
+                                    if ti >= 0
+                                        && ti < time as isize
+                                        && fi >= 0
+                                        && fi < freq as isize
+                                    {
+                                        expected += conv.weight[((co * cin + ci) * kt + a) * kf + b]
+                                            as f64
+                                            * x[(ci * time + ti as usize) * freq + fi as usize]
+                                                as f64;
                                     }
                                 }
                             }
                         }
                         expected += conv.bias[co] as f64;
-                        let value = actual[(co*to+t)*fo+f] as f64;
-                        assert!((value-expected).abs() < 2e-5, "cin={cin} kt={kt} kf={kf} t={t} f={f}: {value} != {expected}");
+                        let value = actual[(co * to + t) * fo + f] as f64;
+                        assert!(
+                            (value - expected).abs() < 2e-5,
+                            "cin={cin} kt={kt} kf={kf} t={t} f={f}: {value} != {expected}"
+                        );
                     }
                 }
             }

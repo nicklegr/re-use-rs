@@ -49,6 +49,8 @@ pub mod audio;
 mod denoiser;
 #[cfg(feature = "gpu")]
 mod gpu;
+#[cfg(feature = "cuda")]
+mod gpu_conv;
 mod layers;
 mod offline;
 mod ops;

@@ -16,3 +16,10 @@ Five original 10 s previews (15 windows): 102.472 -> 93.531 s (-8.7%).
 All 2,205,000 samples bit-identical; 6 CPU unit tests pass. Logs: baseline.log,
 cpu-tiles.log. Short fixtures have only 1.5x work from overlap; long-file target
 still requires further improvement.
+
+Accepted: CUDA encoder/decoders, strict FP32 GEMM, FP64 norm moments, GPU-resident
+activations through Mamba. Preserve CPU's K=256 accumulation blocks and separate
+norm multiply/add rounding. 5x10 s: 93.531 -> 27.978 s; all samples bit-identical.
+CUDA GEMM/norm unit test passes. Log: gpu-conv-3.log. Long-file target remains.
+Rejected prototype: unblocked FP32 GEMM/fused norm changed up to 50 LSB because
+small encoder differences affect the original Mamba's TF32 rounding.
