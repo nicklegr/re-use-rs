@@ -203,6 +203,9 @@ mod kernel {
 }
 
 const BLOCK: u32 = 256;
+// A scan keeps 16 state values live per thread; one warp per block allows
+// more independent blocks to fit when registers limit occupancy.
+const SCAN_BLOCK: u32 = 32;
 
 impl MambaOps for CubeBackend {
     fn mamba_conv(
@@ -271,8 +274,8 @@ impl MambaOps for CubeBackend {
         let client = xc.client.clone();
         scan_kernel::launch(
             &client,
-            calculate_cube_count_elemwise(&client, threads, CubeDim::new_1d(BLOCK)),
-            CubeDim::new_1d(BLOCK),
+            calculate_cube_count_elemwise(&client, threads, CubeDim::new_1d(SCAN_BLOCK)),
+            CubeDim::new_1d(SCAN_BLOCK),
             xz.into_tensor_arg(),
             xc.into_tensor_arg(),
             dbl.into_tensor_arg(),

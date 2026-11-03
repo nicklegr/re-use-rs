@@ -10,6 +10,10 @@ dt weights cached per thread. Interleaved old/new/new/old 10 s fixture:
 All 130 s of reference fixtures bit-identical; 60 s = 29.049 s under this load.
 Logs: mamba-specialized-ab-*.log, mamba-specialized-validation.log.
 Nsight Compute counters unavailable (ERR_NVGPUCTRPERM); driver policy unchanged.
+Accepted: scan block 32 after balanced 256/128/64/32/32/64/128/256 trials.
+10 s times: 256=3.629/3.632, 128=3.519/3.526, 64=3.508/3.514,
+32=3.384/3.375 s; all bit-identical. Full 130 s gate passes; 60 s=25.802 s
+(RTF 0.4300). Log: mamba-scan32-validation.log. Temporary tuning env removed.
 
 Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
 Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,
