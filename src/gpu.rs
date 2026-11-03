@@ -523,6 +523,12 @@ fn cuda_project(
         PlaneTilingBlueprintOptions::default(),
     )?;
     blueprint.tiling_scheme.stage_size.m *= 2;
+    blueprint.tiling_scheme.partition_size.n *= 2;
+    blueprint.check_n_bounds = problem.n
+        % blueprint
+            .tiling_scheme
+            .elements_per_global_partition_along_n() as usize
+        != 0;
     blueprint.check_m_bounds = problem.m
         % blueprint
             .tiling_scheme

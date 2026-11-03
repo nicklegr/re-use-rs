@@ -50,6 +50,10 @@ Accepted: parallel independent STFT/IFFT frames and CPU spectral transforms.
 Keep both IFFT and chunk overlap-add in original order. 60 s=18.796 s
 (RTF 0.3133); all 130 s reference fixtures bit-identical. Strict CUDA clippy
 and CPU unit tests pass. Log: cpu-spectral-validation.log.
+Accepted: double Mamba CMMA column partitions as well as row partitions.
+Mamba 0.538 -> 0.524 s in balanced 1/2/4/2/1 column-width probes; 4 was slower.
+60 s=18.462 s (RTF 0.3077); all 130 s reference fixtures bit-identical;
+strict CUDA clippy and 9 GPU-enabled tests pass. Log: matmul-wide-validation.log.
 
 Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
 Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,
