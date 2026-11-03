@@ -58,6 +58,24 @@ scan. Every accepted change passed the original-reference fixture gate.
 - Nsight Compute counters unavailable (ERR_NVGPUCTRPERM); driver policy untouched.
   Nsight Systems works; latest trace nsys-implicit.nsys-rep/.sqlite.
 
+## FP32 summation-order trial — rejected
+
+User-requested bounded experiment; convolution multiplication/accumulation stayed
+FP32, with Mamba and normalization unchanged. Original acceptance gate unchanged.
+Removing K=256 partial sums alone gave essentially no speedup. Two interleaved
+sums were also negligible; CubeK SimpleUnit FP32 GEMM with bounded im2col tiles
+was slower (20 s fixtures: 5.521 s vs 4.748 s).
+On the 60 s corpus: original 18.143636 s; wider tiles with original sum order
+17.737818 s (bit-identical); wider tiles plus continuous sum 17.498688 s.
+Combined gain 3.55%; reassociation adds only 1.35% over the wider-tile control.
+Full 130 s candidate comparison: max float difference 121.190079 LSB,
+max PCM16 difference 121 (silence); speech/noise previews reached 37 PCM16 LSB.
+GPU warmup also grew from 4.878 to 7.453 s. Candidate rejected; original code
+and default benchmark binary restored. Restored two-preview comparison is exact.
+Logs: fp32-order-{control-*,wide-validation,cubek-probe,restored-check}.log.
+Reproduction artifacts outside Git: fp32-order-wide-probe.patch and
+fp32-order-wide-perf.exe (candidate REUSE_FP32_ORDER=2, REUSE_FP32_TILE=1).
+
 ## Reproduce / artifacts
 
 All binaries, immutable original references, WAV fixtures and logs are outside
