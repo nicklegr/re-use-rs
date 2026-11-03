@@ -11,7 +11,10 @@ use burn::backend::{backend_extension, tensor::FloatTensor, Backend, Dispatch};
 use burn::tensor::DeviceKind;
 use burn::tensor::{Device, Tensor, TensorData};
 use burn_cubecl::{
-    kernel::into_contiguous, ops::numeric::empty_device_dtype, tensor::CubeTensor, CubeBackend,
+    kernel::into_contiguous,
+    ops::numeric::{empty_device_contiguous_dtype, empty_device_dtype},
+    tensor::CubeTensor,
+    CubeBackend,
 };
 use cubecl::{calculate_cube_count_elemwise, prelude::CubeDim};
 use eyre::Result;
@@ -62,6 +65,16 @@ impl GpuDevice {
 
 #[backend_extension(Cube)]
 pub trait MambaOps: Backend {
+    #[allow(clippy::too_many_arguments)]
+    fn finish_block(
+        fw: FloatTensor<Self>,
+        bw: FloatTensor<Self>,
+        projection_bias: FloatTensor<Self>,
+        norm_w: FloatTensor<Self>,
+        norm_b: FloatTensor<Self>,
+        residual: FloatTensor<Self>,
+        batch: usize,
+    ) -> FloatTensor<Self>;
     /// Causal depthwise conv over each sequence, then silu. `xz` is `[batch·len, 2·d_inner]`
     /// (the conv reads its first half), `weight` is `[d_inner, taps]`. Returns
     /// `[batch·len, d_inner]`.
@@ -92,6 +105,75 @@ pub trait MambaOps: Backend {
 
 mod kernel {
     use cubecl::prelude::*;
+
+    /// Match Burn's unit reduction: four lanes, accumulated in channel groups
+    /// of four, then reduced left-to-right from zero. Round squares separately.
+    #[cube(launch)]
+    pub fn finish_kernel<F: Float>(
+        fw: &Tensor<F>,
+        bw: &Tensor<F>,
+        projection_bias: &Tensor<F>,
+        norm_w: &Tensor<F>,
+        norm_b: &Tensor<F>,
+        residual: &Tensor<F>,
+        out: &mut Tensor<F>,
+        rows: u32,
+        batch: u32,
+        #[comptime] channels: u32,
+        #[define(F)] _dtype: ElemType,
+    ) {
+        let row = ABSOLUTE_POS;
+        if row >= rows as usize {
+            terminate!();
+        }
+        let channels = channels as usize;
+        let mut values = Array::<F>::new(channels);
+        let mut sums = Array::<F>::new(4usize);
+        #[unroll]
+        for lane in 0..4usize {
+            sums[lane] = F::new(0.0f32);
+        }
+        #[unroll]
+        for group in 0..channels / 4usize {
+            #[unroll]
+            for lane in 0..4usize {
+                let c = group * 4usize + lane;
+                let at = row * channels + c;
+                let v = (fw[at] + bw[at]) + projection_bias[c];
+                values[c] = v;
+                sums[lane] += v;
+            }
+        }
+        let mean =
+            ((((F::new(0.0f32) + sums[0]) + sums[1]) + sums[2]) + sums[3]) / F::cast_from(channels);
+        #[unroll]
+        for lane in 0..4usize {
+            sums[lane] = F::new(0.0f32);
+        }
+        #[unroll]
+        for group in 0..channels / 4usize {
+            #[unroll]
+            for lane in 0..4usize {
+                let c = group * 4usize + lane;
+                let v = values[c] - mean;
+                values[c] = v;
+                let square = fma(v, v, F::new(0.0f32));
+                sums[lane] += square;
+            }
+        }
+        let variance =
+            ((((F::new(0.0f32) + sums[0]) + sums[1]) + sums[2]) + sums[3]) / F::cast_from(channels);
+        let std = (variance + F::new(1e-5f32)).sqrt();
+        let len = rows as usize / batch as usize;
+        let dst = (row % len) * batch as usize + row / len;
+        #[unroll]
+        for c in 0..channels {
+            let normalized = values[c] / std;
+            let product = fma(normalized, norm_w[c], F::new(0.0f32));
+            let v = product + norm_b[c];
+            out[dst * channels + c] = residual[row * channels + c] + v;
+        }
+    }
 
     /// One thread per (row, channel).
     #[cube(launch)]
@@ -208,6 +290,44 @@ const BLOCK: u32 = 256;
 const SCAN_BLOCK: u32 = 32;
 
 impl MambaOps for CubeBackend {
+    fn finish_block(
+        fw: CubeTensor,
+        bw: CubeTensor,
+        projection_bias: CubeTensor,
+        norm_w: CubeTensor,
+        norm_b: CubeTensor,
+        residual: CubeTensor,
+        batch: usize,
+    ) -> CubeTensor {
+        let [fw, bw, projection_bias, norm_w, norm_b, residual] =
+            [fw, bw, projection_bias, norm_w, norm_b, residual].map(into_contiguous);
+        let (rows, channels) = (fw.meta.shape()[0], fw.meta.shape()[1]);
+        assert!(channels % 4 == 0 && batch > 0 && rows % batch == 0);
+        let out = empty_device_contiguous_dtype(
+            fw.client.clone(),
+            fw.device.clone(),
+            [rows, channels].into(),
+            fw.dtype,
+        );
+        let dtype = burn::backend::cubecl::dtype_to_storage_type(fw.dtype);
+        kernel::finish_kernel::launch(
+            &fw.client,
+            calculate_cube_count_elemwise(&fw.client, rows, CubeDim::new_1d(64)),
+            CubeDim::new_1d(64),
+            fw.clone().into_tensor_arg(),
+            bw.into_tensor_arg(),
+            projection_bias.into_tensor_arg(),
+            norm_w.into_tensor_arg(),
+            norm_b.into_tensor_arg(),
+            residual.into_tensor_arg(),
+            out.clone().into_tensor_arg(),
+            rows as u32,
+            batch as u32,
+            channels as u32,
+            dtype,
+        );
+        out
+    }
     fn mamba_conv(
         xz: CubeTensor,
         weight: CubeTensor,
@@ -433,6 +553,25 @@ impl BiMamba {
             + self.output_bias.clone().unsqueeze::<2>();
         layer_norm(out, &self.norm_w, &self.norm_b)
     }
+
+    fn forward_transposed(&self, x: Tensor<2>, batch: usize) -> Tensor<2> {
+        let [fw_stream, bw_stream] = self.streams.expect("CUDA direction streams");
+        let fw = fw_stream.executes(|| {
+            (self.forward.forward(x.clone(), batch, false) + x.clone()).matmul(self.proj_fw.clone())
+        });
+        let bw = bw_stream.executes(|| {
+            (self.backward.forward(x.clone(), batch, true) + x.clone()).matmul(self.proj_bw.clone())
+        });
+        Tensor::from_dispatch(<Dispatch as MambaOps>::finish_block(
+            fw.into_dispatch(),
+            bw.into_dispatch(),
+            self.output_bias.clone().into_dispatch(),
+            self.norm_w.clone().into_dispatch(),
+            self.norm_b.clone().into_dispatch(),
+            x.into_dispatch(),
+            batch,
+        ))
+    }
 }
 
 struct Block {
@@ -445,6 +584,7 @@ struct Block {
 pub(crate) struct Model {
     blocks: Vec<Block>,
     device: Device,
+    fused_finish: bool,
 }
 
 impl Model {
@@ -459,7 +599,11 @@ impl Model {
                 })
             })
             .collect::<Result<_>>()?;
-        Ok(Self { blocks, device })
+        Ok(Self {
+            blocks,
+            device,
+            fused_finish: parallel,
+        })
     }
 
     /// `rows` is `[freq][time][channels]`; returns the same layout.
@@ -488,6 +632,13 @@ impl Model {
         freq: usize,
         channels: usize,
     ) -> Tensor<2> {
+        if self.fused_finish {
+            for block in &self.blocks {
+                x = block.time.forward_transposed(x, freq);
+                x = block.freq.forward_transposed(x, time);
+            }
+            return x;
+        }
         let positions = time * freq;
         // [a][b][c] -> [b][a][c]
         let swap = |t: Tensor<2>, a: usize, b: usize| {

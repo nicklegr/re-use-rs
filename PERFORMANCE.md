@@ -18,6 +18,13 @@ Accepted: CUDA forward/backward branches use two persistent scoped streams;
 their projections overlap, with the original final addition order unchanged.
 60 s=25.275 s (RTF 0.4212); all 130 s reference fixtures bit-identical.
 Log: mamba-streams-validation.log. Other GPU backends retain sequential branches.
+Accepted: fuse CUDA projection sums, layer norm, outer residual and transpose,
+preserving the original four-lane reduction and separately rounded products.
+Mamba stage 0.634 -> 0.596 s; 60 s=24.367 s (RTF 0.4061).
+All 130 s reference fixtures bit-identical; strict CUDA clippy passes.
+Log: mamba-finish-validation.log.
+Rejected Mamba probes: unchecked indexing and padded projection width offered
+no speedup; separate delta/gate precomputation slowed Mamba to 0.713/0.759 s.
 
 Rules: AGENTS.md. Reference: original CUDA implementation at 88638f3.
 Hardware: i5-12400, RTX 5060 Ti 16 GB, CUDA 13, Windows. All runs at 44.1 kHz,
