@@ -68,29 +68,46 @@ impl Conv {
     fn forward(&self, x: &[f32], time: usize, freq: usize) -> Vec<f32> {
         let (to, fo) = self.out_size(time, freq);
         let k = self.cin * self.kt * self.kf;
-        let tile = (16384 / fo).clamp(1, to);
+        // Bound im2col by its inner dimension, rather than allocating up to
+        // 140 MiB per worker in the last dense layer at 44.1 kHz.
+        let positions = (1024 * 1024 / (4 * k)).max(fo);
+        let tile = (positions / fo).clamp(1, to);
         let tiles: Vec<Vec<f32>> = (0..to.div_ceil(tile))
             .into_par_iter()
-            .map(|i| {
-                let rows = (i * tile..((i + 1) * tile).min(to)).collect::<Vec<_>>();
-                let n = rows.len() * fo;
-                let mut cols = vec![0f32; k * n];
+            .map_init(Vec::<f32>::new, |cols, i| {
+                let first = i * tile;
+                let rows = ((i + 1) * tile).min(to) - first;
+                let n = rows * fo;
+                cols.resize(k * n, 0.0);
                 for ci in 0..self.cin {
                     let plane = &x[ci * time * freq..][..time * freq];
                     for a in 0..self.kt {
                         for b in 0..self.kf {
                             let row = &mut cols[((ci * self.kt + a) * self.kf + b) * n..][..n];
-                            for (j, &t) in rows.iter().enumerate() {
+                            for j in 0..rows {
+                                let t = first + j;
+                                let dst = &mut row[j * fo..][..fo];
                                 let ti = (t * self.stride.0 + a * self.dilation) as isize
                                     - self.pad.0 as isize;
                                 if ti < 0 || ti as usize >= time {
+                                    dst.fill(0.0);
                                     continue;
                                 }
                                 let src = &plane[ti as usize * freq..][..freq];
-                                for f in 0..fo {
-                                    let fi = (f * self.stride.1 + b) as isize - self.pad.1 as isize;
-                                    if fi >= 0 && (fi as usize) < freq {
-                                        row[j * fo + f] = src[fi as usize];
+                                if self.stride.1 == 1 {
+                                    let offset = b as isize - self.pad.1 as isize;
+                                    let begin = (-offset).max(0).min(fo as isize) as usize;
+                                    let end = (freq as isize - offset).clamp(begin as isize, fo as isize) as usize;
+                                    dst[..begin].fill(0.0);
+                                    dst[end..].fill(0.0);
+                                    if end > begin {
+                                        let at = (begin as isize + offset) as usize;
+                                        dst[begin..end].copy_from_slice(&src[at..at + end - begin]);
+                                    }
+                                } else {
+                                    for (f, v) in dst.iter_mut().enumerate() {
+                                        let fi = (f * self.stride.1 + b) as isize - self.pad.1 as isize;
+                                        *v = if fi >= 0 && (fi as usize) < freq { src[fi as usize] } else { 0.0 };
                                     }
                                 }
                             }
@@ -106,7 +123,7 @@ impl Conv {
                     k,
                     &self.weight,
                     k,
-                    &cols,
+                    cols,
                     n,
                     0.0,
                     &mut out,
@@ -528,4 +545,50 @@ fn transpose_outer(x: &[f32], a: usize, b: usize, c: usize) -> Vec<f32> {
         }
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tiled_conv_matches_direct_padding_stride_and_dilation() {
+        for (cin, kt, kf, dilation, pad, stride) in [
+            (64, 3, 3, 2, (2, 1), (1, 1)),
+            (3, 3, 3, 1, (1, 1), (2, 2)),
+            (3, 1, 1, 1, (0, 0), (1, 1)),
+            (3, 3, 1, 1, (1, 0), (1, 1)),
+        ] {
+            let (time, freq, cout) = (31, 64, 2);
+            let x: Vec<f32> = (0..cin*time*freq).map(|i| ((i*17%127) as f32-63.0)/127.0).collect();
+            let conv = Conv {
+                weight: (0..cout*cin*kt*kf).map(|i| ((i*7%41) as f32-20.0)/128.0).collect(),
+                bias: vec![0.125, -0.25], cin, cout, kt, kf, dilation, pad, stride,
+            };
+            let (to, fo) = conv.out_size(time, freq);
+            let actual = conv.forward(&x, time, freq);
+            for co in 0..cout {
+                for t in 0..to {
+                    for f in 0..fo {
+                        let mut expected = 0.0f64;
+                        for ci in 0..cin {
+                            for a in 0..kt {
+                                for b in 0..kf {
+                                    let ti = (t*stride.0+a*dilation) as isize-pad.0 as isize;
+                                    let fi = (f*stride.1+b) as isize-pad.1 as isize;
+                                    if ti >= 0 && ti < time as isize && fi >= 0 && fi < freq as isize {
+                                        expected += conv.weight[((co*cin+ci)*kt+a)*kf+b] as f64
+                                            * x[(ci*time+ti as usize)*freq+fi as usize] as f64;
+                                    }
+                                }
+                            }
+                        }
+                        expected += conv.bias[co] as f64;
+                        let value = actual[(co*to+t)*fo+f] as f64;
+                        assert!((value-expected).abs() < 2e-5, "cin={cin} kt={kt} kf={kf} t={t} f={f}: {value} != {expected}");
+                    }
+                }
+            }
+        }
+    }
 }

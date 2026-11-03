@@ -10,3 +10,9 @@ Fixtures and immutable baseline binaries/outputs: ../work/perf-loop (not tracked
 Rust harness: `cargo build --release --features cuda --example perf`, then
 `perf record|check <model> <reference-dir> <input.wav>...`. Uses 5 s / 50%
 chunking, one warmup, reports chunked RTF and fails any sample beyond 1 LSB.
+
+Accepted: cache-bounded CPU im2col tiles, reusable scratch, contiguous row copies.
+Five original 10 s previews (15 windows): 102.472 -> 93.531 s (-8.7%).
+All 2,205,000 samples bit-identical; 6 CPU unit tests pass. Logs: baseline.log,
+cpu-tiles.log. Short fixtures have only 1.5x work from overlap; long-file target
+still requires further improvement.
